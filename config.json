@@ -1,0 +1,25 @@
+{
+    "Basic": {
+        "ffmpeg_path": "C:\\Users\\luck\\Desktop\\unclock\\um\\ffmpeg.exe",
+        "input_dir": "D:/CloudMusic/VipSongsDownload",
+        "output_dir": "D:/CloudMusic/VipSongsDownload/output",
+        "um_path": "C:\\Users\\luck\\Desktop\\unclock\\um\\um.exe"
+    },
+    "QFluentWidgets": {
+        "FontFamilies": [
+            "Segoe UI",
+            "Microsoft YaHei",
+            "PingFang SC"
+        ],
+        "ThemeColor": "#ff009faa",
+        "ThemeMode": "Light"
+    },
+    "Conversion": {
+        "overwrite": "是",
+        "remove_source": "否",
+        "skip_noop": "是",
+        "update_metadata": "是",
+        "verbose": "否",
+        "watch": "默认"
+    }
+}
