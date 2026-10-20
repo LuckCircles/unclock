@@ -57,8 +57,8 @@ class TaskCard(CardWidget):
         self.textLayout.addWidget(self.metaLabel)
 
         self.hLayout.addLayout(self.textLayout, 1)
-        self.hLayout.addWidget(self._build_badge(), 0, Qt.AlignTop)
 
+        self._badge = None
         self.set_status("pending")
 
     def _meta_text(self, file_path: str) -> str:
@@ -68,11 +68,6 @@ class TaskCard(CardWidget):
             return f"{format_size(stats.st_size)} · {when} · {compact_path(file_path)}"
         except OSError:
             return compact_path(file_path)
-
-    def _build_badge(self):
-        method, text = _STATUS_META["pending"]
-        self._badge = InfoBadge.info(text, parent=self)
-        return self._badge
 
     def set_status(self, status: str):
         if status not in _STATUS_META:

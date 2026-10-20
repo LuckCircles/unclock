@@ -2,7 +2,6 @@
 """主界面 —— 工具检测卡片 + 路径快捷卡片 + 开始/停止按钮。"""
 
 import os
-from pathlib import Path
 
 from PySide6.QtCore import QFile, QSize, Qt, QUrl
 from PySide6.QtGui import QDesktopServices
@@ -24,7 +23,7 @@ from ..common.resource import image
 from ..common.signal_bus import signalBus
 from ..components.interface import Interface
 from ..components.path_card import PathCard
-from ..components.version_card import VersionCard, VersionCardView
+from ..components.version_card import VersionCard
 
 
 class HomeInterface(Interface):

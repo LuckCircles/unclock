@@ -10,7 +10,7 @@ service 解耦。
 import os
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QProcess
+from PySide6.QtCore import QObject, QProcess, QTimer
 
 from ..common.config import cfg
 from ..common.logger import logger
@@ -105,7 +105,10 @@ class UnlockMusicConverter(QObject):
                 f"启动失败: {Path(self.current_file).name}", "error"
             )
             signalBus.file_finished.emit(self.current_file, False)
-            self._start_next_file()
+            self.current_file = None
+            # 用 singleShot 延迟到下一轮事件循环，避免递归阻塞 UI
+            QTimer.singleShot(0, self._start_next_file)
+            return
 
     def _build_file_args(self, file_path: str) -> list[str]:
         args = ["-i", file_path]
@@ -176,3 +179,10 @@ class UnlockMusicConverter(QObject):
             self.current_file = None
             signalBus.log_emitted.emit("进程异常退出。", "error")
             signalBus.conversion_finished.emit(-1)
+        elif error == QProcess.FailedToStart:
+            # waitForStarted 失败路径已处理 file_finished，此处仅记录日志
+            signalBus.log_emitted.emit(
+                "进程启动失败，请检查 um.exe 路径与权限。", "error"
+            )
+        else:
+            signalBus.log_emitted.emit(f"进程错误: {error}", "warning")

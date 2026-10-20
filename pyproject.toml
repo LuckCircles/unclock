@@ -1,12 +1,12 @@
 [project]
 name = "unclock"
 version = "0.1.0"
-description = "Add your description here"
+description = "基于 PySide6 + QFluentWidgets 的 Unlock Music (um) 图形化前端"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "loguru>=0.7.3",
-    "Nuitka[onefile]",
+    "Nuitka",
     "pyside6>=6.11.0",
     "pyside6-fluent-widgets>=1.11.2",
 ]

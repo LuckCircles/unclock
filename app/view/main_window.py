@@ -1,6 +1,8 @@
 # coding: utf-8
 """主窗口 —— MSFluentWindow，持有 service 实例并装配各页面。"""
 
+import os
+
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 from qfluentwidgets import FluentIcon, MSFluentWindow, NavigationItemPosition
@@ -68,7 +70,7 @@ class MainWindow(MSFluentWindow):
         files = self.taskInterface.get_file_paths()
         if not files:
             input_dir = cfg.input_dir.value
-            if input_dir and __import__("os").path.exists(input_dir):
+            if input_dir and os.path.exists(input_dir):
                 signalBus.log_emitted.emit(
                     f"列表为空，正在扫描输入目录: {input_dir}", "info"
                 )

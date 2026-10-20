@@ -19,6 +19,9 @@ wheels/
 # Local workspace data
 .workbuddy/
 
+# Build output
+releases/
+
 # Example folders
 examples/
 example/
