@@ -11,7 +11,8 @@ from qfluentwidgets import (
     CaptionLabel,
     FluentIcon,
     HorizontalFlipView,
-    TitleLabel,
+    PrimaryPushButton,
+    SubtitleLabel,
     TogglePushButton,
 )
 
@@ -41,12 +42,17 @@ class HomeInterface(Interface):
             self.flipView.setCurrentIndex(0)
         self.vLayout.addWidget(self.flipView)
 
-        self.heroTitle = TitleLabel("音乐解锁工具", self)
+        # 标题区（单行紧凑：标题左、副标题右下对齐）
+        self.heroLayout = QHBoxLayout()
+        self.heroLayout.setContentsMargins(0, 0, 0, 0)
+        self.heroTitle = SubtitleLabel("音乐解锁工具", self)
         self.heroSubtitle = CaptionLabel(
             "快速查看环境、打开目录并管理当前转换任务", self
         )
-        self.vLayout.addWidget(self.heroTitle)
-        self.vLayout.addWidget(self.heroSubtitle)
+        self.heroLayout.addWidget(self.heroTitle)
+        self.heroLayout.addStretch(1)
+        self.heroLayout.addWidget(self.heroSubtitle, 0, Qt.AlignBottom)
+        self.vLayout.addLayout(self.heroLayout)
 
         # 工具检测卡片
         self.umCard = VersionCard("Unlock Music (um)", image("pwa.png"))
@@ -59,7 +65,7 @@ class HomeInterface(Interface):
         self.cardView.addCard(self.ffmpegCard)
         self.vLayout.addWidget(self.cardView)
 
-        # 目录快捷卡片
+        # 目录快捷卡片（定宽居中，避免全宽拉伸显得空旷）
         self.pathCardsLayout = QHBoxLayout()
         self.pathCardsLayout.setSpacing(20)
         self.inputDirCard = PathCard(
@@ -68,18 +74,23 @@ class HomeInterface(Interface):
         self.outputDirCard = PathCard(
             "输出目录", "未设置输出目录", FluentIcon.MUSIC_FOLDER, self
         )
-        self.pathCardsLayout.addWidget(self.inputDirCard, 1)
-        self.pathCardsLayout.addWidget(self.outputDirCard, 1)
+        for card in (self.inputDirCard, self.outputDirCard):
+            card.setFixedWidth(430)
+        self.pathCardsLayout.addStretch(1)
+        self.pathCardsLayout.addWidget(self.inputDirCard)
+        self.pathCardsLayout.addWidget(self.outputDirCard)
+        self.pathCardsLayout.addStretch(1)
         self.vLayout.addLayout(self.pathCardsLayout)
 
-        # 开始 / 停止按钮
+        # 开始 / 停止按钮（开始按钮用主题色填充，更醒目）
         self.buttonLayout = QHBoxLayout()
         self.buttonLayout.setSpacing(18)
         self.buttonLayout.setAlignment(Qt.AlignCenter)
-        self.btnStart = TogglePushButton(self)
-        self.btnStart.setFixedSize(220, 50)
+        self.btnStart = PrimaryPushButton(self)
+        self.btnStart.setCheckable(True)
+        self.btnStart.setFixedSize(210, 46)
         self.btnStop = TogglePushButton("停止转换", self)
-        self.btnStop.setFixedSize(220, 50)
+        self.btnStop.setFixedSize(210, 46)
         self.buttonLayout.addWidget(self.btnStart)
         self.buttonLayout.addWidget(self.btnStop)
         self.vLayout.addLayout(self.buttonLayout)

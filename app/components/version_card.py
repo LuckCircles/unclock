@@ -23,7 +23,7 @@ class VersionCard(CardWidget):
         self.base_title = title
 
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Minimum)
-        self.setFixedWidth(260)
+        self.setFixedWidth(300)
 
         self.hLayout = QHBoxLayout(self)
         self.hLayout.setContentsMargins(14, 10, 14, 10)
@@ -50,7 +50,7 @@ class VersionCard(CardWidget):
         )
 
         self.pathLabel = CaptionLabel("路径未设置", self)
-        self.pathLabel.setWordWrap(True)
+        self.pathLabel.setWordWrap(False)
         self.pathLabel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
 
         # 状态徽章（官方 Fluent 主题色）
@@ -86,7 +86,7 @@ class VersionCard(CardWidget):
     def _compact_path(path) -> str:
         from ..common.utils import compact_path
 
-        return compact_path(path)
+        return compact_path(path, max_len=42)
 
 
 class VersionCardView(QWidget):
