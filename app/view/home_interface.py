@@ -11,6 +11,8 @@ from qfluentwidgets import (
     CaptionLabel,
     FluentIcon,
     HorizontalFlipView,
+    InfoBar,
+    InfoBarPosition,
     PrimaryPushButton,
     StrongBodyLabel,
     SubtitleLabel,
@@ -142,10 +144,17 @@ class HomeInterface(Interface):
     def _open_output_dir(self):
         self._open_directory(cfg.output_dir.value, "输出目录")
 
-    @staticmethod
-    def _open_directory(path, label):
+    def _open_directory(self, path, label):
         if not path or not os.path.isdir(path):
-            signalBus.log_emitted.emit(f"{label}未设置或路径不存在。", "warning")
+            InfoBar.warning(
+                title="提示",
+                content=f"{label}未设置或路径不存在",
+                orient=Qt.Horizontal,
+                isClosable=True,
+                duration=3000,
+                position=InfoBarPosition.TOP_RIGHT,
+                parent=self.window(),
+            )
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
