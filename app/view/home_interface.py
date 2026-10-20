@@ -4,7 +4,8 @@
 import os
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QSize, Qt, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QHBoxLayout
 from qfluentwidgets import (
     CaptionLabel,
@@ -119,19 +120,13 @@ class HomeInterface(Interface):
         self.ffmpegCard.update_info(ff_ver, ff_path, ff_ready)
 
     def _open_input_dir(self):
-        from PySide6.QtGui import QDesktopServices, QUrl
-
-        self._open_directory(cfg.input_dir.value, "输入目录", QDesktopServices, QUrl)
+        self._open_directory(cfg.input_dir.value, "输入目录")
 
     def _open_output_dir(self):
-        from PySide6.QtGui import QDesktopServices, QUrl
-
-        self._open_directory(
-            cfg.output_dir.value, "输出目录", QDesktopServices, QUrl
-        )
+        self._open_directory(cfg.output_dir.value, "输出目录")
 
     @staticmethod
-    def _open_directory(path, label, QDesktopServices, QUrl):
+    def _open_directory(path, label):
         if not path or not os.path.isdir(path):
             signalBus.log_emitted.emit(f"{label}未设置或路径不存在。", "warning")
             return
