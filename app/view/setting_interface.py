@@ -3,9 +3,8 @@
 
 from PySide6.QtWidgets import QFileDialog
 from qfluentwidgets import (
+    ComboBoxSettingCard,
     FluentIcon,
-    OptionsSettingCard,
-    OptionsValidator,
     PushSettingCard,
     SettingCardGroup,
     qconfig,
@@ -55,7 +54,7 @@ class SettingInterface(Interface):
             (cfg.skip_noop, "跳过无动作解码器", "-n"),
         ]
         for config_item, label, arg in options_meta:
-            card = OptionsSettingCard(
+            card = ComboBoxSettingCard(
                 config_item, FluentIcon.SETTING, label,
                 f"对应参数: {arg}", ["否", "是", "默认"], self.convGroup,
             )
