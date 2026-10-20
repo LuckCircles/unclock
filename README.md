@@ -56,14 +56,16 @@ unclock/
 │   ├── service/                   # 业务服务层（封装外部进程，view 不直接碰 QProcess）
 │   │   ├── tool_detector.py        #   检测 um / ffmpeg 版本
 │   │   └── converter.py            #   UnlockMusicConverter：批量队列 + QProcess + 事件广播
-│   ├── resources/                  # 外部可执行文件（um.exe / ffmpeg.exe）
+│   ├── resources/                  # 外部可执行 + 图片资源
+│   │   ├── img/                    # Banner 与工具图标
+│   │   ├── um.exe                  # Unlock Music CLI
+│   │   └── ffmpeg.exe              # FFmpeg
 │   └── view/                      # 界面层
 │       ├── main_window.py          #   MSFluentWindow 主窗口，持有 service 并装配页面
 │       ├── home_interface.py       #   首页（banner + 工具检测 + 路径卡片 + 启动按钮）
 │       ├── task_interface.py       #   任务管理（卡片式文件列表）
 │       ├── log_interface.py        #   运行日志
 │       └── setting_interface.py    #   配置界面
-├── img/                           # Banner 与工具图标
 ├── pyproject.toml
 └── uv.lock
 ```
