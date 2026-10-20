@@ -1,7 +1,7 @@
-"""Nuitka onefile 打包脚本。
+"""Nuitka standalone 打包脚本。
 
 用法：.venv\\Scripts\\python.exe build.py
-产物：releases\\音乐解锁工具.exe（单文件，内嵌 um.exe / ffmpeg.exe）
+产物：releases\\音乐解锁工具.dist\\音乐解锁工具.exe（多文件目录，内嵌 um.exe / ffmpeg.exe / qmpc-mmkv-cli.exe）
 """
 
 import os
@@ -19,7 +19,7 @@ APP_NAME = "音乐解锁工具"
 ICON_PATH = "app/resources/img/pwa.ico"
 OUTPUT_DIR = "releases"
 EXE_BASENAME = APP_NAME
-ONEFILE_TEMPDIR_SPEC = r"{CACHE_DIR}\unclock\{VERSION}"
+DIST_SUFFIX = ".dist"
 
 
 def load_version() -> str:
@@ -45,7 +45,7 @@ def compile_qrc() -> None:
 
 
 def preflight() -> None:
-    """预检 Nuitka、入口脚本、um 目录。"""
+    """预检 Nuitka、入口脚本、resources 目录及内嵌可执行文件。"""
     compile_qrc()
     if (
         shutil.which("nuitka") is None
@@ -54,7 +54,15 @@ def preflight() -> None:
         print("[预检失败] 未找到 Nuitka，请先安装：uv add nuitka")
         sys.exit(1)
 
-    missing = [str(p) for p in (ROOT / MAIN_SCRIPT, ROOT / "app" / "resources", ROOT / ICON_PATH) if not p.exists()]
+    required = [
+        ROOT / MAIN_SCRIPT,
+        ROOT / "app" / "resources",
+        ROOT / ICON_PATH,
+        ROOT / "app" / "resources" / "um.exe",
+        ROOT / "app" / "resources" / "ffmpeg.exe",
+        ROOT / "app" / "resources" / "qmpc-mmkv-cli.exe",
+    ]
+    missing = [str(p) for p in required if not p.exists()]
     if missing:
         print(f"[预检失败] 文件不存在：{'、'.join(missing)}")
         sys.exit(1)
@@ -63,11 +71,10 @@ def preflight() -> None:
 def build_command(version: str) -> list[str]:
     return [
         sys.executable, "-m", "nuitka",
-        "--onefile",
+        "--standalone",
         "--remove-output",
         f"--output-dir={OUTPUT_DIR}",
-        f"--output-filename={EXE_BASENAME}",
-        f"--onefile-tempdir-spec={ONEFILE_TEMPDIR_SPEC}",
+        f"--output-filename={EXE_BASENAME}.exe",
         "--msvc=latest",
         f"--jobs={os.cpu_count() or 8}",
         "--disable-ccache",
@@ -108,13 +115,17 @@ def main() -> None:
         print("\n已取消编译")
         sys.exit(130)
 
-    exe_path = ROOT / OUTPUT_DIR / f"{EXE_BASENAME}.exe"
+    dist_dir = ROOT / OUTPUT_DIR / f"{EXE_BASENAME}{DIST_SUFFIX}"
+    exe_path = dist_dir / f"{EXE_BASENAME}.exe"
     elapsed = time.perf_counter() - start
     print(f"\n编译成功完成！耗时 {elapsed / 60:.1f} 分钟")
-    print(f"产物：{exe_path}")
+    print(f"产物目录：{dist_dir}")
     if exe_path.exists():
         size_mb = exe_path.stat().st_size / 1024 / 1024
-        print(f"大小：{size_mb:.1f} MB")
+        total_mb = sum(f.stat().st_size for f in dist_dir.rglob("*") if f.is_file()) / 1024 / 1024
+        print(f"主程序大小：{size_mb:.1f} MB")
+        print(f"整个目录大小：{total_mb:.1f} MB")
+        print(f"入口：{exe_path}")
 
 
 if __name__ == "__main__":

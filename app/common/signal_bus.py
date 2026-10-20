@@ -25,7 +25,7 @@ class SignalBus(QObject):
     files_changed = Signal(int)             # file count
 
     # ===== 工具检测（service → home） =====
-    tools_detected = Signal(str, bool, str, bool)  # um_ver, um_ready, ff_ver, ff_ready
+    tools_detected = Signal(str, bool, str, bool, str, bool)  # um_ver, um_ready, ff_ver, ff_ready, qmpc_ver, qmpc_ready
 
     # ===== 路径变更（config → 首页/任务页） =====
     paths_changed = Signal()

@@ -16,7 +16,7 @@ from qfluentwidgets import (
 class VersionCard(CardWidget):
     """工具版本卡片（自适应紧凑版，样式由 Fluent 主题接管）。"""
 
-    def __init__(self, title: str, image_path: str, parent=None):
+    def __init__(self, title: str, image_path: str, description: str = "", parent=None):
         super().__init__(parent)
         self.base_title = title
 
@@ -47,16 +47,17 @@ class VersionCard(CardWidget):
             QSizePolicy.Ignored, QSizePolicy.Minimum
         )
 
-        self.pathLabel = CaptionLabel("路径未设置", self)
-        self.pathLabel.setWordWrap(False)
-        self.pathLabel.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Minimum)
+        # 功能描述（固定文案，不随路径变化，避免长路径截断）
+        self.descLabel = CaptionLabel(description, self)
+        self.descLabel.setWordWrap(False)
+        self.descLabel.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Minimum)
 
         # 状态徽章（官方 Fluent 主题色）
         self.readyBadge = InfoBadge.success("READY", parent=self)
         self.missBadge = InfoBadge.warning("MISS", parent=self)
 
         self.textLayout.addWidget(self.nameVersionLabel)
-        self.textLayout.addWidget(self.pathLabel)
+        self.textLayout.addWidget(self.descLabel)
 
         self.hLayout.addWidget(self.iconLabel, 0, Qt.AlignTop)
         self.hLayout.addLayout(self.textLayout, 1)
@@ -65,7 +66,7 @@ class VersionCard(CardWidget):
 
         self._set_badge_state(False)
 
-    def update_info(self, version: str, path: str = "", ready: bool = True):
+    def update_info(self, version: str, ready: bool = True):
         value = version
         if "um v" in version:
             value = version.replace("um ", "")
@@ -73,18 +74,11 @@ class VersionCard(CardWidget):
             value = version.replace("ffmpeg ", "")
 
         self.nameVersionLabel.setText(f"{self.base_title} {value}")
-        self.pathLabel.setText(self._compact_path(path) if path else "路径未设置")
         self._set_badge_state(ready)
 
     def _set_badge_state(self, ready: bool):
         self.readyBadge.setVisible(ready)
         self.missBadge.setVisible(not ready)
-
-    @staticmethod
-    def _compact_path(path) -> str:
-        from ..common.utils import compact_path
-
-        return compact_path(path, max_len=42)
 
 
 class VersionCardView(QWidget):

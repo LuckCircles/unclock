@@ -57,11 +57,19 @@ class HomeInterface(Interface):
         self.heroLayout.addWidget(self.heroSubtitle, 0, Qt.AlignBottom)
         self.vLayout.addLayout(self.heroLayout)
 
-        # 工具检测卡片（两卡均分，与下方路径卡片同构对齐）
-        self.umCard = VersionCard("Unlock Music (um)", image("pwa.png"))
-        self.ffmpegCard = VersionCard("FFmpeg", image("ffmpeg.png"))
-        self.umCard.update_info("检测中...", "", False)
-        self.ffmpegCard.update_info("检测中...", "", False)
+        # 工具检测卡片（三卡均分，与下方路径卡片同构对齐）
+        self.umCard = VersionCard(
+            "Unlock Music (um)", image("pwa.png"), "音乐解锁核心引擎"
+        )
+        self.ffmpegCard = VersionCard(
+            "FFmpeg", image("ffmpeg.png"), "音频转码 / 元数据写入"
+        )
+        self.qmpcCard = VersionCard(
+            "QMPC MMKV", image("fliew.png"), "QQ 音乐密钥自动提取"
+        )
+        self.umCard.update_info("检测中...", False)
+        self.ffmpegCard.update_info("检测中...", False)
+        self.qmpcCard.update_info("检测中...", False)
 
         self.toolsTitle = StrongBodyLabel("工具检测", self)
         self.vLayout.addWidget(self.toolsTitle)
@@ -71,6 +79,7 @@ class HomeInterface(Interface):
         self.toolsRow.setSpacing(20)
         self.toolsRow.addWidget(self.umCard, 1)
         self.toolsRow.addWidget(self.ffmpegCard, 1)
+        self.toolsRow.addWidget(self.qmpcCard, 1)
         self.vLayout.addLayout(self.toolsRow)
 
         # 目录快捷卡片（与工具行同构，均分对齐）
@@ -132,11 +141,10 @@ class HomeInterface(Interface):
             self._set_button_state("stopping")
         self.btnStop.setChecked(self._button_state == "running")
 
-    def _on_tools_detected(self, um_ver, um_ready, ff_ver, ff_ready):
-        um_path = cfg.um_path.value
-        ff_path = cfg.ffmpeg_path.value
-        self.umCard.update_info(um_ver, um_path, um_ready)
-        self.ffmpegCard.update_info(ff_ver, ff_path, ff_ready)
+    def _on_tools_detected(self, um_ver, um_ready, ff_ver, ff_ready, qmpc_ver, qmpc_ready):
+        self.umCard.update_info(um_ver, um_ready)
+        self.ffmpegCard.update_info(ff_ver, ff_ready)
+        self.qmpcCard.update_info(qmpc_ver, qmpc_ready)
 
     def _open_input_dir(self):
         self._open_directory(cfg.input_dir.value, "输入目录")

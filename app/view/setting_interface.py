@@ -39,7 +39,11 @@ class SettingInterface(Interface):
             "选择文件", FluentIcon.VIDEO, "ffmpeg 路径",
             cfg.ffmpeg_path.value, self.view,
         )
-        for card in (self.inputCard, self.outputCard, self.umPathCard, self.ffmpegPathCard):
+        self.qmpcPathCard = PushSettingCard(
+            "选择文件", FluentIcon.COMMAND_PROMPT, "qmpc-mmkv-cli 路径",
+            cfg.qmpc_path.value, self.view,
+        )
+        for card in (self.inputCard, self.outputCard, self.umPathCard, self.ffmpegPathCard, self.qmpcPathCard):
             self.basicGroup.addSettingCard(card)
         self.vLayout.addWidget(self.basicGroup)
 
@@ -67,6 +71,7 @@ class SettingInterface(Interface):
         self.outputCard.clicked.connect(self._select_output)
         self.umPathCard.clicked.connect(self._select_um)
         self.ffmpegPathCard.clicked.connect(self._select_ffmpeg)
+        self.qmpcPathCard.clicked.connect(self._select_qmpc)
 
     def _select_input(self):
         folder = QFileDialog.getExistingDirectory(self, "选择输入目录")
@@ -99,3 +104,11 @@ class SettingInterface(Interface):
         if file:
             qconfig.set(cfg.ffmpeg_path, file)
             self.ffmpegPathCard.setContent(file)
+
+    def _select_qmpc(self):
+        file, _ = QFileDialog.getOpenFileName(
+            self, "选择 qmpc-mmkv-cli.exe", "", "Executable (*.exe)"
+        )
+        if file:
+            qconfig.set(cfg.qmpc_path, file)
+            self.qmpcPathCard.setContent(file)

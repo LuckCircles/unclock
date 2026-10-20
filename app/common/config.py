@@ -26,6 +26,7 @@ class Config(QConfig):
     output_dir = ConfigItem("Basic", "output_dir", "")
     um_path = ConfigItem("Basic", "um_path", "")
     ffmpeg_path = ConfigItem("Basic", "ffmpeg_path", "")
+    qmpc_path = ConfigItem("Basic", "qmpc_path", "")
 
     # ===== 转换选项（三态：否 / 是 / 默认） =====
     remove_source = OptionsConfigItem(
@@ -53,11 +54,14 @@ cfg = Config()
 # 默认可执行文件位于项目 app/resources/ 目录
 _DEFAULT_UM = str(PROJECT_ROOT / "app" / "resources" / "um.exe")
 _DEFAULT_FFMPEG = str(PROJECT_ROOT / "app" / "resources" / "ffmpeg.exe")
+_DEFAULT_QMPC = str(PROJECT_ROOT / "app" / "resources" / "qmpc-mmkv-cli.exe")
 
 if not cfg.um_path.value:
     qconfig.set(cfg.um_path, _DEFAULT_UM)
 if not cfg.ffmpeg_path.value:
     qconfig.set(cfg.ffmpeg_path, _DEFAULT_FFMPEG)
+if not cfg.qmpc_path.value:
+    qconfig.set(cfg.qmpc_path, _DEFAULT_QMPC)
 
 qconfig.load(CONFIG_PATH, cfg)
 
@@ -66,3 +70,5 @@ if not Path(cfg.um_path.value).exists():
     qconfig.set(cfg.um_path, _DEFAULT_UM)
 if not Path(cfg.ffmpeg_path.value).exists():
     qconfig.set(cfg.ffmpeg_path, _DEFAULT_FFMPEG)
+if not Path(cfg.qmpc_path.value).exists():
+    qconfig.set(cfg.qmpc_path, _DEFAULT_QMPC)

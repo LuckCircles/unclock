@@ -112,6 +112,10 @@ class UnlockMusicConverter(QObject):
         if cfg.output_dir.value:
             args.extend(["-o", cfg.output_dir.value])
 
+        # QQ Music 密钥自动获取（通过 qmpc-mmkv-cli.exe）
+        if cfg.qmpc_path.value and os.path.exists(cfg.qmpc_path.value):
+            args.extend(["--qmpc-mmkv-cli-exe", cfg.qmpc_path.value])
+
         if _TRISTATE.get(cfg.remove_source.value) is True:
             args.append("--rs")
         if _TRISTATE.get(cfg.verbose.value) is True:
