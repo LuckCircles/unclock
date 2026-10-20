@@ -22,8 +22,8 @@ class VersionCard(CardWidget):
         super().__init__(parent)
         self.base_title = title
 
-        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Minimum)
-        self.setFixedWidth(300)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        self.setMinimumWidth(0)
 
         self.hLayout = QHBoxLayout(self)
         self.hLayout.setContentsMargins(14, 10, 14, 10)
@@ -46,12 +46,12 @@ class VersionCard(CardWidget):
 
         self.nameVersionLabel = StrongBodyLabel(title, self)
         self.nameVersionLabel.setSizePolicy(
-            QSizePolicy.Expanding, QSizePolicy.Minimum
+            QSizePolicy.Ignored, QSizePolicy.Minimum
         )
 
         self.pathLabel = CaptionLabel("路径未设置", self)
         self.pathLabel.setWordWrap(False)
-        self.pathLabel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        self.pathLabel.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Minimum)
 
         # 状态徽章（官方 Fluent 主题色）
         self.readyBadge = InfoBadge.success("READY", parent=self)

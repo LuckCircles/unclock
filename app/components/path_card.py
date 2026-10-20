@@ -20,6 +20,7 @@ class PathCard(CardWidget):
     def __init__(self, title: str, description: str, icon, parent=None):
         super().__init__(parent)
         self.setCursor(Qt.PointingHandCursor)
+        self.setMinimumWidth(0)
 
         self.hLayout = QHBoxLayout(self)
         self.hLayout.setContentsMargins(18, 16, 18, 16)

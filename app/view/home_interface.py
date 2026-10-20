@@ -12,6 +12,7 @@ from qfluentwidgets import (
     FluentIcon,
     HorizontalFlipView,
     PrimaryPushButton,
+    StrongBodyLabel,
     SubtitleLabel,
     TogglePushButton,
 )
@@ -54,19 +55,28 @@ class HomeInterface(Interface):
         self.heroLayout.addWidget(self.heroSubtitle, 0, Qt.AlignBottom)
         self.vLayout.addLayout(self.heroLayout)
 
-        # 工具检测卡片
+        # 工具检测卡片（两卡均分，与下方路径卡片同构对齐）
         self.umCard = VersionCard("Unlock Music (um)", image("pwa.png"))
         self.ffmpegCard = VersionCard("FFmpeg", image("ffmpeg.png"))
         self.umCard.update_info("检测中...", "", False)
         self.ffmpegCard.update_info("检测中...", "", False)
 
-        self.cardView = VersionCardView("工具检测")
-        self.cardView.addCard(self.umCard)
-        self.cardView.addCard(self.ffmpegCard)
-        self.vLayout.addWidget(self.cardView)
+        self.toolsTitle = StrongBodyLabel("工具检测", self)
+        self.vLayout.addWidget(self.toolsTitle)
 
-        # 目录快捷卡片（定宽居中，避免全宽拉伸显得空旷）
+        self.toolsRow = QHBoxLayout()
+        self.toolsRow.setContentsMargins(0, 0, 0, 0)
+        self.toolsRow.setSpacing(20)
+        self.toolsRow.addWidget(self.umCard, 1)
+        self.toolsRow.addWidget(self.ffmpegCard, 1)
+        self.vLayout.addLayout(self.toolsRow)
+
+        # 目录快捷卡片（与工具行同构，均分对齐）
+        self.pathsTitle = StrongBodyLabel("目录", self)
+        self.vLayout.addWidget(self.pathsTitle)
+
         self.pathCardsLayout = QHBoxLayout()
+        self.pathCardsLayout.setContentsMargins(0, 0, 0, 0)
         self.pathCardsLayout.setSpacing(20)
         self.inputDirCard = PathCard(
             "输入目录", "未设置输入目录", FluentIcon.FOLDER, self
@@ -74,12 +84,8 @@ class HomeInterface(Interface):
         self.outputDirCard = PathCard(
             "输出目录", "未设置输出目录", FluentIcon.MUSIC_FOLDER, self
         )
-        for card in (self.inputDirCard, self.outputDirCard):
-            card.setFixedWidth(430)
-        self.pathCardsLayout.addStretch(1)
-        self.pathCardsLayout.addWidget(self.inputDirCard)
-        self.pathCardsLayout.addWidget(self.outputDirCard)
-        self.pathCardsLayout.addStretch(1)
+        self.pathCardsLayout.addWidget(self.inputDirCard, 1)
+        self.pathCardsLayout.addWidget(self.outputDirCard, 1)
         self.vLayout.addLayout(self.pathCardsLayout)
 
         # 开始 / 停止按钮（开始按钮用主题色填充，更醒目）

@@ -1,0 +1,102 @@
+"""Nuitka onefile 打包脚本。
+
+用法：.venv\\Scripts\\python.exe build.py
+产物：releases\\音乐解锁工具.exe（单文件，内嵌 um.exe / ffmpeg.exe）
+"""
+
+import os
+import shutil
+import subprocess
+import sys
+import time
+import tomllib
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+
+MAIN_SCRIPT = "main.py"
+APP_NAME = "音乐解锁工具"
+OUTPUT_DIR = "releases"
+EXE_BASENAME = APP_NAME
+ONEFILE_TEMPDIR_SPEC = r"{CACHE_DIR}\unclock\{VERSION}"
+
+
+def load_version() -> str:
+    """从 pyproject.toml 读取 [project].version。"""
+    with open(ROOT / "pyproject.toml", "rb") as f:
+        return tomllib.load(f)["project"]["version"]
+
+
+def preflight() -> None:
+    """预检 Nuitka、入口脚本、um 目录。"""
+    if (
+        shutil.which("nuitka") is None
+        and not (ROOT / ".venv" / "Scripts" / "nuitka.exe").exists()
+    ):
+        print("[预检失败] 未找到 Nuitka，请先安装：uv add nuitka")
+        sys.exit(1)
+
+    missing = [str(p) for p in (ROOT / MAIN_SCRIPT, ROOT / "um") if not p.exists()]
+    if missing:
+        print(f"[预检失败] 文件不存在：{'、'.join(missing)}")
+        sys.exit(1)
+
+
+def build_command(version: str) -> list[str]:
+    return [
+        sys.executable, "-m", "nuitka",
+        "--onefile",
+        "--remove-output",
+        f"--output-dir={OUTPUT_DIR}",
+        f"--output-filename={EXE_BASENAME}",
+        f"--onefile-tempdir-spec={ONEFILE_TEMPDIR_SPEC}",
+        "--msvc=latest",
+        f"--jobs={os.cpu_count() or 8}",
+        "--disable-ccache",
+        "--assume-yes-for-downloads",
+        "--follow-imports",
+        "--enable-plugins=pyside6,anti-bloat",
+        "--include-package-data=qfluentwidgets",
+        "--include-data-dir=um=um",
+        "--windows-console-mode=disable",
+        "--windows-company-name=unclock",
+        f"--windows-product-name={APP_NAME}",
+        "--file-description=Unlock Music GUI",
+        f"--file-version={version}",
+        f"--product-version={version}",
+        f"--main={MAIN_SCRIPT}",
+        "--include-windows-runtime-dlls=yes",
+    ]
+
+
+def main() -> None:
+    preflight()
+    version = load_version()
+    command = build_command(version)
+
+    print(f"版本号：{version}（来源 pyproject.toml）")
+    print("执行命令：")
+    print(" ".join(command))
+    print()
+
+    start = time.perf_counter()
+    try:
+        subprocess.run(command, check=True, cwd=str(ROOT))
+    except subprocess.CalledProcessError as e:
+        print(f"\n编译过程中出现错误：{e}")
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print("\n已取消编译")
+        sys.exit(130)
+
+    exe_path = ROOT / OUTPUT_DIR / f"{EXE_BASENAME}.exe"
+    elapsed = time.perf_counter() - start
+    print(f"\n编译成功完成！耗时 {elapsed / 60:.1f} 分钟")
+    print(f"产物：{exe_path}")
+    if exe_path.exists():
+        size_mb = exe_path.stat().st_size / 1024 / 1024
+        print(f"大小：{size_mb:.1f} MB")
+
+
+if __name__ == "__main__":
+    main()
