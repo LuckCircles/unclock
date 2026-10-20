@@ -15,3 +15,6 @@ import io
 # 屏蔽 QFluentWidgets Pro 推广输出（必须位于任何 qfluentwidgets 导入之前）
 with contextlib.redirect_stdout(io.StringIO()):
     import qfluentwidgets.common.config  # noqa: F401
+
+# 注册 Qt 资源（img/ 下的图片经 qrc 编译后用 :/img/... 访问）
+from . import resource_rc  # noqa: F401  pylint: disable=wrong-import-position

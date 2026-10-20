@@ -39,6 +39,8 @@ uv run python main.py
 unclock/
 ├── main.py                       # 薄入口：屏蔽推广输出 + 创建 Application + MainWindow
 ├── app/
+│   ├── resource.qrc               # 图片资源清单（编译为 resource_rc.py）
+│   ├── resource_rc.py             # qrc 编译产物（:/img/ 访问）
 │   ├── common/                    # 基础设施层
 │   │   ├── application.py          #   SingletonApplication 包装
 │   │   ├── config.py               #   QConfig + 全局 cfg（路径 / 转换选项）

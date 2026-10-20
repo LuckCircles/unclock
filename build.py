@@ -27,8 +27,25 @@ def load_version() -> str:
         return tomllib.load(f)["project"]["version"]
 
 
+def compile_qrc() -> None:
+    """编译 app/resource.qrc -> app/resource_rc.py（图片资源注册）。"""
+    rcc = ROOT / ".venv" / "Scripts" / "pyside6-rcc.exe"
+    if not rcc.exists():
+        found = shutil.which("pyside6-rcc")
+        rcc = Path(found) if found else rcc
+    if not rcc.exists():
+        print("[预检失败] 未找到 pyside6-rcc")
+        sys.exit(1)
+    subprocess.run(
+        [str(rcc), str(ROOT / "app" / "resource.qrc"),
+         "-o", str(ROOT / "app" / "resource_rc.py")],
+        check=True, cwd=str(ROOT),
+    )
+
+
 def preflight() -> None:
     """预检 Nuitka、入口脚本、um 目录。"""
+    compile_qrc()
     if (
         shutil.which("nuitka") is None
         and not (ROOT / ".venv" / "Scripts" / "nuitka.exe").exists()

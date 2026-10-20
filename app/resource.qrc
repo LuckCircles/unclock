@@ -1,0 +1,9 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+    <qresource prefix="/img">
+        <file alias="welcome.png">resources/img/welcome.png</file>
+        <file alias="pwa.png">resources/img/pwa.png</file>
+        <file alias="ffmpeg.png">resources/img/ffmpeg.png</file>
+        <file alias="fliew.png">resources/img/fliew.png</file>
+    </qresource>
+</RCC>

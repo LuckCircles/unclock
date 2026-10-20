@@ -4,7 +4,7 @@
 import os
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt, QUrl
+from PySide6.QtCore import QFile, QSize, Qt, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QHBoxLayout
 from qfluentwidgets import (
@@ -38,7 +38,7 @@ class HomeInterface(Interface):
         self.flipView.setItemSize(QSize(940, 220))
         self.flipView.setAspectRatioMode(Qt.KeepAspectRatioByExpanding)
         welcome_path = image("welcome.png")
-        if os.path.exists(welcome_path):
+        if QFile.exists(welcome_path):
             self.flipView.addImage(welcome_path)
             self.flipView.setCurrentIndex(0)
         self.vLayout.addWidget(self.flipView)

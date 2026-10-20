@@ -1,9 +1,7 @@
 # coding: utf-8
 """工具版本卡片 + 卡片容器 —— 官方 Fluent 主题色，无自定义 QSS。"""
 
-import os
-
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QFile, Qt
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import (
@@ -31,7 +29,7 @@ class VersionCard(CardWidget):
 
         # 图标
         self.iconLabel = QLabel(self)
-        if os.path.exists(image_path):
+        if QFile.exists(image_path):
             self.iconLabel.setPixmap(
                 QPixmap(image_path).scaled(
                     40, 40, Qt.KeepAspectRatio, Qt.SmoothTransformation
