@@ -7,6 +7,7 @@ from qfluentwidgets import FluentIcon, MSFluentWindow, NavigationItemPosition
 
 from ..common.config import cfg
 from ..common.logger import logger
+from ..common.resource import binary
 from ..common.signal_bus import signalBus
 from ..service.converter import UnlockMusicConverter
 from ..service.tool_detector import ToolDetector
@@ -54,7 +55,7 @@ class MainWindow(MSFluentWindow):
     def init_window(self):
         self.resize(1080, 760)
         self.setWindowTitle("音乐解锁工具 - Fluent UI")
-        self.setWindowIcon(QIcon(":/qfluentwidgets/images/logo.png"))
+        self.setWindowIcon(QIcon(binary("img/pwa.ico")))
         desktop = QApplication.primaryScreen().availableGeometry()
         w, h = desktop.width(), desktop.height()
         self.move(w // 2 - self.width() // 2, h // 2 - self.height() // 2)

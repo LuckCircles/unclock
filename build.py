@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parent
 
 MAIN_SCRIPT = "main.py"
 APP_NAME = "音乐解锁工具"
+ICON_PATH = "app/resources/img/pwa.ico"
 OUTPUT_DIR = "releases"
 EXE_BASENAME = APP_NAME
 ONEFILE_TEMPDIR_SPEC = r"{CACHE_DIR}\unclock\{VERSION}"
@@ -53,7 +54,7 @@ def preflight() -> None:
         print("[预检失败] 未找到 Nuitka，请先安装：uv add nuitka")
         sys.exit(1)
 
-    missing = [str(p) for p in (ROOT / MAIN_SCRIPT, ROOT / "app" / "resources") if not p.exists()]
+    missing = [str(p) for p in (ROOT / MAIN_SCRIPT, ROOT / "app" / "resources", ROOT / ICON_PATH) if not p.exists()]
     if missing:
         print(f"[预检失败] 文件不存在：{'、'.join(missing)}")
         sys.exit(1)
@@ -76,6 +77,7 @@ def build_command(version: str) -> list[str]:
         "--include-package-data=qfluentwidgets",
         "--include-data-dir=app/resources=app/resources",
         "--windows-console-mode=disable",
+        f"--windows-icon-from-ico={ICON_PATH}",
         "--windows-company-name=unclock",
         f"--windows-product-name={APP_NAME}",
         "--file-description=Unlock Music GUI",
