@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 
 # 受 Unlock Music 支持的文件后缀集合
+# 来源：um v0.2.20 `um --supported-ext`（运行时可用该命令动态核对）
 SUPPORTED_SUFFIXES = {
     ".666c6163",
     ".6d3461",
@@ -30,6 +31,7 @@ SUPPORTED_SUFFIXES = {
     ".mflac",
     ".mflac0",
     ".mflac1",
+    ".mflac2",
     ".mflaca",
     ".mflach",
     ".mflacl",
@@ -37,6 +39,7 @@ SUPPORTED_SUFFIXES = {
     ".mgg",
     ".mgg0",
     ".mgg1",
+    ".mgg2",
     ".mgga",
     ".mggh",
     ".mggl",
