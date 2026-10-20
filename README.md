@@ -33,18 +33,46 @@ uv run python main.py
 
 ## 项目结构
 
+参照 [Fluent-M3U8](https://github.com/zhiyiYo/Fluent-M3U8) 的分层设计，按 `common / components / service / view / resource` 五层组织：
+
 ```
 unclock/
-├── main.py              # 入口：屏蔽 QFluentWidgets 推广输出后启动 GUI
-├── src/
-│   ├── um.py            # 主窗口、配置管理、工具检测、转换流程、首页/配置页
-│   ├── list_view.py     # 文件管理页面（受支持格式与表格操作）
-│   └── log_view.py     # 运行日志页面
-├── img/                 # Banner 与工具图标
-├── um/                  # 外部可执行文件（um.exe / ffmpeg.exe）
+├── main.py                       # 薄入口：屏蔽推广输出 + 创建 Application + MainWindow
+├── app/
+│   ├── common/                    # 基础设施层
+│   │   ├── application.py          #   SingletonApplication 包装
+│   │   ├── config.py               #   QConfig + 全局 cfg（路径 / 转换选项）
+│   │   ├── signal_bus.py           #   全局信号总线（解耦 view ↔ service）
+│   │   ├── logger.py               #   loguru 配置
+│   │   ├── resource.py             #   资源路径常量
+│   │   ├── icon.py                 #   FluentIcon 别名
+│   │   └── utils.py                #   受支持格式 / 路径压缩 / 进程输出解析
+│   ├── components/                # 可复用 UI 组件层（无自定义 QSS）
+│   │   ├── interface.py            #   页面基类 Interface(ScrollArea)
+│   │   ├── version_card.py         #   工具版本卡片 + 流式容器
+│   │   ├── path_card.py            #   主页目录快捷卡片
+│   │   ├── task_card.py            #   转换任务卡片（InfoBadge 状态徽章）
+│   │   └── empty_status.py         #   空状态提示
+│   ├── service/                   # 业务服务层（封装外部进程，view 不直接碰 QProcess）
+│   │   ├── tool_detector.py        #   检测 um / ffmpeg 版本
+│   │   └── converter.py            #   UnlockMusicConverter：批量队列 + QProcess + 事件广播
+│   └── view/                      # 界面层
+│       ├── main_window.py          #   MSFluentWindow 主窗口，持有 service 并装配页面
+│       ├── home_interface.py       #   首页（banner + 工具检测 + 路径卡片 + 启动按钮）
+│       ├── task_interface.py       #   任务管理（卡片式文件列表）
+│       ├── log_interface.py        #   运行日志
+│       └── setting_interface.py    #   配置界面
+├── img/                           # Banner 与工具图标
+├── um/                            # 外部可执行文件（um.exe / ffmpeg.exe）
 ├── pyproject.toml
 └── uv.lock
 ```
+
+### 分层与通信
+
+- **view ↔ service 解耦**：view 通过 `signalBus.request_start / request_stop` 驱动服务，service 反向经 `signalBus.file_started / file_finished / log_emitted / conversion_started / conversion_finished / tools_detected` 广播事件；view 监听这些信号更新 UI，双方互不持有引用。
+- **MainWindow 协调**：首页"开始"按钮 → `request_start` → MainWindow 从 TaskInterface 取文件列表交给 `UnlockMusicConverter.start(files)`。
+- **样式策略**：全部使用官方 Fluent 主题色与组件（`StrongBodyLabel / CaptionLabel / CardWidget / InfoBadge / PlainTextEdit`），无任何自定义 QSS。
 
 ## 运行时文件
 

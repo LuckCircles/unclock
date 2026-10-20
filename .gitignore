@@ -16,6 +16,9 @@ wheels/
 *.json
 !*.example.json
 
+# Local workspace data
+.workbuddy/
+
 # Example folders
 examples/
 example/
