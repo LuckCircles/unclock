@@ -50,9 +50,9 @@ class Config(QConfig):
 
 cfg = Config()
 
-# 默认可执行文件位于项目 um/ 目录
-_DEFAULT_UM = str(PROJECT_ROOT / "um" / "um.exe")
-_DEFAULT_FFMPEG = str(PROJECT_ROOT / "um" / "ffmpeg.exe")
+# 默认可执行文件位于项目 app/resources/ 目录
+_DEFAULT_UM = str(PROJECT_ROOT / "app" / "resources" / "um.exe")
+_DEFAULT_FFMPEG = str(PROJECT_ROOT / "app" / "resources" / "ffmpeg.exe")
 
 if not cfg.um_path.value:
     qconfig.set(cfg.um_path, _DEFAULT_UM)
@@ -60,3 +60,9 @@ if not cfg.ffmpeg_path.value:
     qconfig.set(cfg.ffmpeg_path, _DEFAULT_FFMPEG)
 
 qconfig.load(CONFIG_PATH, cfg)
+
+# 迁移兼容：若持久化路径已失效（如 um/ → app/resources/ 迁移后），回退默认值
+if not Path(cfg.um_path.value).exists():
+    qconfig.set(cfg.um_path, _DEFAULT_UM)
+if not Path(cfg.ffmpeg_path.value).exists():
+    qconfig.set(cfg.ffmpeg_path, _DEFAULT_FFMPEG)

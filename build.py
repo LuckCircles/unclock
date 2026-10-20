@@ -36,7 +36,7 @@ def preflight() -> None:
         print("[预检失败] 未找到 Nuitka，请先安装：uv add nuitka")
         sys.exit(1)
 
-    missing = [str(p) for p in (ROOT / MAIN_SCRIPT, ROOT / "um") if not p.exists()]
+    missing = [str(p) for p in (ROOT / MAIN_SCRIPT, ROOT / "app" / "resources") if not p.exists()]
     if missing:
         print(f"[预检失败] 文件不存在：{'、'.join(missing)}")
         sys.exit(1)
@@ -57,7 +57,7 @@ def build_command(version: str) -> list[str]:
         "--follow-imports",
         "--enable-plugins=pyside6,anti-bloat",
         "--include-package-data=qfluentwidgets",
-        "--include-data-dir=um=um",
+        "--include-data-dir=app/resources=app/resources",
         "--windows-console-mode=disable",
         "--windows-company-name=unclock",
         f"--windows-product-name={APP_NAME}",

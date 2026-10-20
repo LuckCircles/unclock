@@ -17,7 +17,7 @@
 | PySide6 | `>=6.11.0` |
 | PySide6-Fluent-Widgets | `>=1.11.2` |
 | loguru | `>=0.7.3` |
-| 外部可执行 | `um.exe`、`ffmpeg.exe`（放置于项目 `um/` 目录） |
+| 外部可执行 | `um.exe`、`ffmpeg.exe`（放置于项目 `app/resources/` 目录） |
 
 ## 快速开始
 
@@ -25,7 +25,7 @@
 # 安装依赖（推荐 uv）
 uv sync
 
-# 将 um.exe 与 ffmpeg.exe 放入项目 um/ 目录（程序会自动检测并填入默认路径）
+# 将 um.exe 与 ffmpeg.exe 放入项目 app/resources/ 目录（程序会自动检测并填入默认路径）
 
 # 启动
 uv run python main.py
@@ -56,6 +56,7 @@ unclock/
 │   ├── service/                   # 业务服务层（封装外部进程，view 不直接碰 QProcess）
 │   │   ├── tool_detector.py        #   检测 um / ffmpeg 版本
 │   │   └── converter.py            #   UnlockMusicConverter：批量队列 + QProcess + 事件广播
+│   ├── resources/                  # 外部可执行文件（um.exe / ffmpeg.exe）
 │   └── view/                      # 界面层
 │       ├── main_window.py          #   MSFluentWindow 主窗口，持有 service 并装配页面
 │       ├── home_interface.py       #   首页（banner + 工具检测 + 路径卡片 + 启动按钮）
@@ -63,7 +64,6 @@ unclock/
 │       ├── log_interface.py        #   运行日志
 │       └── setting_interface.py    #   配置界面
 ├── img/                           # Banner 与工具图标
-├── um/                            # 外部可执行文件（um.exe / ffmpeg.exe）
 ├── pyproject.toml
 └── uv.lock
 ```
