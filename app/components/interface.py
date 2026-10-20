@@ -22,3 +22,7 @@ class Interface(ScrollArea):
         self.setWidget(self.view)
         self.setWidgetResizable(True)
         self.setObjectName(object_name)
+
+        # 让滚动区背景透明，融入 MSFluentWindow 的主题背景色，
+        # 避免内容区出现与窗口不一致的白色/深色分层色块
+        self.enableTransparentBackground()
