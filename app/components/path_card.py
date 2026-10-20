@@ -1,7 +1,7 @@
 # coding: utf-8
 """主页目录快捷卡片 —— 点击打开系统文件管理器。"""
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout
 from qfluentwidgets import (
     BodyLabel,
@@ -13,9 +13,7 @@ from qfluentwidgets import (
 
 
 class PathCard(CardWidget):
-    """主页目录快捷卡片。"""
-
-    clicked = Signal()
+    """主页目录快捷卡片（点击信号复用 CardWidget.clicked）。"""
 
     def __init__(self, title: str, description: str, icon, parent=None):
         super().__init__(parent)
@@ -47,7 +45,3 @@ class PathCard(CardWidget):
     def set_path(self, path: str, fallback: str):
         self.pathLabel.setText(path or fallback)
 
-    def mouseReleaseEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self.clicked.emit()
-        super().mouseReleaseEvent(event)
