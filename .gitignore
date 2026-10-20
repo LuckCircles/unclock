@@ -9,11 +9,12 @@ wheels/
 # Virtual environments
 .venv
 
+# Logs
+*.log
+
 # Config files (keep structure, ignore content)
-config.*
-*.config.*
-!config.example.*
-!*.config.example.*
+*.json
+!*.example.json
 
 # Example folders
 examples/

@@ -1,5 +1,13 @@
+import contextlib
+import io
 import sys
+
+# 屏蔽 QFluentWidgets 推广输出（必须位于首次导入 qfluentwidgets 之前）
+with contextlib.redirect_stdout(io.StringIO()):
+    import qfluentwidgets.common.config  # noqa: F401
+
 from PySide6.QtWidgets import QApplication
+
 from src.um import UnlockMusicGUI
 
 

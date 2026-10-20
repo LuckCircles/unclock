@@ -1,9 +1,15 @@
+import contextlib
+import io
 import json
 import os
 import re
 import subprocess
 import sys
 from pathlib import Path
+
+# 屏蔽 QFluentWidgets 推广输出（必须位于首次导入 qfluentwidgets 之前）
+with contextlib.redirect_stdout(io.StringIO()):
+    import qfluentwidgets.common.config  # noqa: F401
 
 from loguru import logger
 from PySide6.QtCore import QProcess, QSize, Qt, QUrl, Signal
@@ -26,6 +32,7 @@ from qfluentwidgets import (
     FluentIcon,
     HorizontalFlipView,
     IconWidget,
+    InfoBadge,
     MSFluentWindow,
     NavigationItemPosition,
     OptionsConfigItem,
@@ -35,6 +42,7 @@ from qfluentwidgets import (
     QConfig,
     ScrollArea,
     SettingCardGroup,
+    StrongBodyLabel,
     TitleLabel,
     TogglePushButton,
     qconfig,
@@ -88,12 +96,11 @@ qconfig.load(str(cfg.project_root / "config.json"), cfg)
 
 
 class VersionCard(CardWidget):
-    """工具版本卡片（自适应紧凑版）"""
+    """工具版本卡片（自适应紧凑版，样式由 Fluent 主题接管）"""
 
-    def __init__(self, title, image_path, accent_color, parent=None):
+    def __init__(self, title, image_path, parent=None):
         super().__init__(parent)
 
-        self.accent_color = accent_color
         self.base_title = title
 
         # ✅ 自适应高度
@@ -121,34 +128,17 @@ class VersionCard(CardWidget):
         self.textLayout.setContentsMargins(0, 0, 0, 0)
 
         # 第一行：名称 + 版本
-        self.nameVersionLabel = QLabel(title, self)
+        self.nameVersionLabel = StrongBodyLabel(title, self)
         self.nameVersionLabel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
-        self.nameVersionLabel.setStyleSheet(
-            """
-            font-size: 15px;
-            color: #111827;
-            padding: 0px;
-            margin: 0px;
-        """
-        )
 
         # 第二行：路径
-        self.pathLabel = QLabel("路径未设置", self)
+        self.pathLabel = CaptionLabel("路径未设置", self)
         self.pathLabel.setWordWrap(True)
         self.pathLabel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
-        self.pathLabel.setStyleSheet(
-            """
-            font-size: 12px;
-            color: #9ca3af;
-            padding: 0px;
-            margin: 0px;
-        """
-        )
 
-        # ===== 右上角 badge =====
-        self.badgeLabel = QLabel("READY", self)
-        self.badgeLabel.setAlignment(Qt.AlignCenter)
-        self.badgeLabel.setFixedWidth(56)
+        # ===== 右上角状态徽章（官方 Fluent 主题色） =====
+        self.readyBadge = InfoBadge.success("READY", parent=self)
+        self.missBadge = InfoBadge.warning("MISS", parent=self)
 
         # ===== 布局 =====
         self.textLayout.addWidget(self.nameVersionLabel)
@@ -156,24 +146,10 @@ class VersionCard(CardWidget):
 
         self.hLayout.addWidget(self.iconLabel, 0, Qt.AlignTop)
         self.hLayout.addLayout(self.textLayout, 1)
-        self.hLayout.addWidget(self.badgeLabel, 0, Qt.AlignTop)
+        self.hLayout.addWidget(self.readyBadge, 0, Qt.AlignTop)
+        self.hLayout.addWidget(self.missBadge, 0, Qt.AlignTop)
 
-        # ===== 样式 =====
-        self.setStyleSheet(
-            f"""
-            VersionCard {{
-                border-radius: 14px;
-                border: 1px solid {accent_color}33;
-                background-color: {accent_color}0A;
-            }}
-            VersionCard:hover {{
-                border: 1px solid {accent_color}66;
-                background-color: {accent_color}14;
-            }}
-        """
-        )
-
-        self._set_badge_style(True)
+        self._set_badge_state(False)
 
     def update_info(self, version, path="", ready=True):
         value = version
@@ -188,20 +164,11 @@ class VersionCard(CardWidget):
 
         self.pathLabel.setText(self._compact_path(path) if path else "路径未设置")
 
-        self.badgeLabel.setText("READY" if ready else "MISS")
-        self._set_badge_style(ready)
+        self._set_badge_state(ready)
 
-    def _set_badge_style(self, ready):
-        bg = "#0f8c4a" if ready else "#6b7280"
-        self.badgeLabel.setStyleSheet(
-            f"""
-            background-color: {bg};
-            color: white;
-            border-radius: 10px;
-            padding: 3px 6px;
-            font-size: 11px;
-        """
-        )
+    def _set_badge_state(self, ready):
+        self.readyBadge.setVisible(ready)
+        self.missBadge.setVisible(not ready)
 
     def _compact_path(self, path):
         normalized = str(path).replace("\\", "/")
@@ -216,7 +183,7 @@ class VersionCardView(QWidget):
     def __init__(self, title: str, parent=None):
         super().__init__(parent)
 
-        self.titleLabel = QLabel(title, self)
+        self.titleLabel = StrongBodyLabel(title, self)
 
         self.vBoxLayout = QVBoxLayout(self)
         self.flowLayout = FlowLayout()
@@ -230,14 +197,6 @@ class VersionCardView(QWidget):
 
         self.vBoxLayout.addWidget(self.titleLabel)
         self.vBoxLayout.addLayout(self.flowLayout, 1)
-
-        self.titleLabel.setStyleSheet(
-            """
-            font-size: 16px;
-            font-weight: 600;
-            color: #111827;
-        """
-        )
 
     # ✅ 关键：接收已有卡片
     def addCard(self, card: QWidget):
@@ -329,15 +288,10 @@ class HomeInterface(ScrollArea):
         self.vLayout.addWidget(self.heroTitle)
         self.vLayout.addWidget(self.heroSubtitle)
 
-        # self.cardsLayout = QHBoxLayout()
-        # self.cardsLayout.setSpacing(20)
-
         # ===== 工具检测卡片 =====
-        self.umCard = VersionCard(
-            "Unlock Music (um)", str(img_dir / "pwa.png"), "#0f6cbd"
-        )
+        self.umCard = VersionCard("Unlock Music (um)", str(img_dir / "pwa.png"))
 
-        self.ffmpegCard = VersionCard("FFmpeg", str(img_dir / "ffmpeg.png"), "#0f6cbd")
+        self.ffmpegCard = VersionCard("FFmpeg", str(img_dir / "ffmpeg.png"))
 
         # 初始显示（可选）
         self.umCard.update_info("检测中...", "", False)
@@ -351,12 +305,6 @@ class HomeInterface(ScrollArea):
 
         # ✅ 加入主布局
         self.vLayout.addWidget(self.cardView)
-
-        # self.umCard = VersionCard("Unlock Music (um)", str(img_dir / "pwa.png"), "#0f6cbd", self)
-        # self.ffmpegCard = VersionCard("FFmpeg", str(img_dir / "ffmpeg.png"), "#0f6cbd", self)
-        # self.cardsLayout.addWidget(self.umCard, 1)
-        # self.cardsLayout.addWidget(self.ffmpegCard, 1)
-        # self.vLayout.addLayout(self.cardsLayout)
 
         self.pathCardsLayout = QHBoxLayout()
         self.pathCardsLayout.setSpacing(20)
