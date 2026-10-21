@@ -6,9 +6,7 @@
 可执行文件仍走文件系统 ``app/resources/``。
 """
 
-from pathlib import Path
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+from .config import PROJECT_ROOT
 
 RESOURCES_DIR = PROJECT_ROOT / "app" / "resources"
 

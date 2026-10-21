@@ -8,11 +8,13 @@ from PySide6.QtWidgets import QApplication
 from qfluentwidgets import FluentIcon, MSFluentWindow, NavigationItemPosition
 
 from ..common.config import cfg
+from ..common.decrypt_scanner import classify_files
 from ..common.logger import logger
 from ..common.resource import binary
 from ..common.signal_bus import signalBus
 from ..service.converter import UnlockMusicConverter
 from ..service.tool_detector import ToolDetector
+from .decrypted_interface import DecryptedInterface
 from .home_interface import HomeInterface
 from .log_interface import LogInterface
 from .setting_interface import SettingInterface
@@ -33,6 +35,7 @@ class MainWindow(MSFluentWindow):
         # 页面
         self.homeInterface = HomeInterface(self)
         self.taskInterface = TaskInterface(self)
+        self.decryptedInterface = DecryptedInterface(self)
         self.logInterface = LogInterface(self)
         self.settingInterface = SettingInterface(self)
 
@@ -48,6 +51,7 @@ class MainWindow(MSFluentWindow):
     def init_navigation(self):
         self.addSubInterface(self.homeInterface, FluentIcon.HOME, "主界面")
         self.addSubInterface(self.taskInterface, FluentIcon.MUSIC, "任务管理")
+        self.addSubInterface(self.decryptedInterface, FluentIcon.COMPLETED, "已解密")
         self.addSubInterface(self.logInterface, FluentIcon.DOCUMENT, "运行日志")
         self.addSubInterface(
             self.settingInterface, FluentIcon.SETTING, "配置界面",
@@ -76,8 +80,36 @@ class MainWindow(MSFluentWindow):
                 )
                 self.taskInterface.scan_directory(input_dir)
                 files = self.taskInterface.get_file_paths()
-        # 真正启动转换
-        self.converter.start(files)
+
+        # 输入/输出目录对比：扫描输出目录建「已解密基名集合」，遍历文件分类汇总
+        decrypted, pending, skipped = classify_files(files, cfg.output_dir.value)
+        total_enc = len(decrypted) + len(pending)
+        if skipped:
+            signalBus.log_emitted.emit(
+                f"已跳过 {len(skipped)} 个非加密文件。", "info"
+            )
+        signalBus.log_emitted.emit(
+            f"检测到加密文件 {total_enc} 个：已解密 {len(decrypted)}，待解密 {len(pending)}。",
+            "info",
+        )
+
+        # 覆盖已转换：开启 → 解密全部加密文件；关闭 → 仅解密未解密文件
+        if cfg.reconvert_done.value:
+            to_convert = decrypted + pending
+        else:
+            to_convert = pending
+            if decrypted:
+                signalBus.log_emitted.emit(
+                    f"已跳过 {len(decrypted)} 个已解密文件（开启“覆盖已转换”可重新解密）。",
+                    "info",
+                )
+
+        if not to_convert:
+            signalBus.toast_requested.emit("没有待解密的文件。", "warning")
+            return
+
+        # 真正启动解密
+        self.converter.start(to_convert)
 
     def on_exit(self):
         """应用退出前的清理钩子。"""

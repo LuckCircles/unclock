@@ -16,9 +16,24 @@ class ToolDetector(QObject):
     """检测 um.exe / ffmpeg.exe / qmpc-mmkv-cli.exe 是否存在并解析其版本号。"""
 
     def detect(self):
+        logger.info("开始工具链自动检测")
         um_ver, um_ready = self._check_um()
         ff_ver, ff_ready = self._check_ffmpeg()
         qmpc_ver, qmpc_ready = self._check_qmpc()
+        logger.info(
+            f"工具链检测完成: um={um_ver}({'就绪' if um_ready else '缺失'}) "
+            f"ffmpeg={ff_ver}({'就绪' if ff_ready else '缺失'}) "
+            f"qmpc={qmpc_ver}({'就绪' if qmpc_ready else '缺失'})"
+        )
+        # 工具监测情况同步到运行日志页（每个 exe 一行）
+        for name, ver, ready in (
+            ("um.exe", um_ver, um_ready),
+            ("ffmpeg.exe", ff_ver, ff_ready),
+            ("qmpc-mmkv-cli.exe", qmpc_ver, qmpc_ready),
+        ):
+            signalBus.log_emitted.emit(
+                f"工具监测 {name}: {ver} ({'就绪' if ready else '缺失'})", "info"
+            )
         signalBus.tools_detected.emit(
             um_ver, um_ready, ff_ver, ff_ready, qmpc_ver, qmpc_ready
         )

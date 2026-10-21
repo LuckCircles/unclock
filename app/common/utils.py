@@ -76,6 +76,34 @@ def is_supported_file(path) -> bool:
     return any(lower.endswith(suffix) for suffix in SUPPORTED_SUFFIXES)
 
 
+# 明文音频后缀（非加密，无需解密）
+PLAIN_AUDIO_SUFFIXES = {
+    ".aac", ".flac", ".m4a", ".mp3", ".ogg", ".wav", ".wma",
+}
+
+# 加密格式后缀 = 受支持 - 明文（保留 .kgm.flac / .vpr.flac 等复合后缀）
+ENCRYPTED_SUFFIXES = SUPPORTED_SUFFIXES - PLAIN_AUDIO_SUFFIXES
+
+
+def is_encrypted_file(path) -> bool:
+    """是否为加密音乐文件（需要解密）；明文音频与非支持文件均返回 False。"""
+    lower = str(path).lower()
+    return any(lower.endswith(suffix) for suffix in ENCRYPTED_SUFFIXES)
+
+
+def target_basename(file_name: str) -> str:
+    """去后缀得到目标基名：优先剥掉最长的匹配加密后缀（含 .kgm.flac 复合后缀），
+    否则剥掉最后一个扩展名。用于输入/输出目录按文件名比对。"""
+    lower = file_name.lower()
+    best = ""
+    for suffix in ENCRYPTED_SUFFIXES:
+        if lower.endswith(suffix) and len(suffix) > len(best):
+            best = suffix
+    if best:
+        return file_name[: len(file_name) - len(best)]
+    return Path(file_name).stem
+
+
 def compact_path(path, max_len: int = 80) -> str:
     normalized = str(path).replace("\\", "/")
     if len(normalized) <= max_len:

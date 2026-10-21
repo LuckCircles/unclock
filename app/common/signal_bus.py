@@ -15,11 +15,12 @@ class SignalBus(QObject):
     request_stop = Signal()
 
     # ===== 转换事件（service → view） =====
-    conversion_started = Signal()
+    conversion_started = Signal(int)          # total（本轮任务文件总数，供进度条计算）
     conversion_finished = Signal(int)        # exit_code
     file_started = Signal(str)              # file_path
     file_finished = Signal(str, bool)       # file_path, success
     log_emitted = Signal(str, str)          # message, level
+    toast_requested = Signal(str, str)      # message, level（请求首页弹 InfoBar 浮层）
 
     # ===== 文件管理（task_interface → 外部） =====
     files_changed = Signal(int)             # file count

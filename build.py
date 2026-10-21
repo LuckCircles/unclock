@@ -4,6 +4,7 @@
 产物：releases\\音乐解锁工具.dist\\音乐解锁工具.exe（多文件目录，内嵌 um.exe / ffmpeg.exe / qmpc-mmkv-cli.exe）
 """
 
+import glob
 import os
 import shutil
 import subprocess
@@ -69,7 +70,7 @@ def preflight() -> None:
 
 
 def build_command(version: str) -> list[str]:
-    return [
+    cmd = [
         sys.executable, "-m", "nuitka",
         "--standalone",
         "--remove-output",
@@ -82,7 +83,6 @@ def build_command(version: str) -> list[str]:
         "--follow-imports",
         "--enable-plugins=pyside6,anti-bloat",
         "--include-package-data=qfluentwidgets",
-        "--include-data-dir=app/resources=app/resources",
         "--windows-console-mode=disable",
         f"--windows-icon-from-ico={ICON_PATH}",
         "--windows-company-name=unclock",
@@ -93,6 +93,16 @@ def build_command(version: str) -> list[str]:
         f"--main={MAIN_SCRIPT}",
         "--include-windows-runtime-dlls=yes",
     ]
+    # 通配扫描 app/resources/*.exe，逐个显式包含（确保三个工具 exe 不遗漏）
+    exe_files = sorted(glob.glob("app/resources/*.exe"))
+    if not exe_files:
+        print("[警告] app/resources/ 下未发现任何 .exe")
+    for exe in exe_files:
+        cmd.append(f"--include-data-file={exe}={exe}")
+        print(f"  包含 exe: {exe}")
+    # img 子目录（图标/banner/pwa.ico）整体包含
+    cmd.append("--include-data-dir=app/resources/img=app/resources/img")
+    return cmd
 
 
 def main() -> None:

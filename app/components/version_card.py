@@ -20,8 +20,9 @@ class VersionCard(CardWidget):
         super().__init__(parent)
         self.base_title = title
 
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setMinimumWidth(0)
+        self.setFixedHeight(64)
 
         self.hLayout = QHBoxLayout(self)
         self.hLayout.setContentsMargins(14, 10, 14, 10)

@@ -7,6 +7,7 @@ from qfluentwidgets import (
     FluentIcon,
     PushSettingCard,
     SettingCardGroup,
+    SwitchSettingCard,
     qconfig,
 )
 
@@ -64,6 +65,17 @@ class SettingInterface(Interface):
             )
             self.convGroup.addSettingCard(card)
         self.vLayout.addWidget(self.convGroup)
+
+        # ===== 任务行为 =====
+        self.behaviorGroup = SettingCardGroup("任务行为", self.view)
+        self.reconvertCard = SwitchSettingCard(
+            FluentIcon.SYNC, "覆盖已转换",
+            "开启后重新转换已成功转换的文件；关闭则自动跳过已完成文件，仅处理待转换/失败项。",
+            cfg.reconvert_done, self.behaviorGroup,
+        )
+        self.behaviorGroup.addSettingCard(self.reconvertCard)
+        self.vLayout.addWidget(self.behaviorGroup)
+
         self.vLayout.addStretch(1)
 
         # 信号

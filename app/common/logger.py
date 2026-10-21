@@ -11,6 +11,7 @@ logger.add(
     rotation="5 MB",
     encoding="utf-8",
     level="DEBUG",
+    format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <7} | {name}:{function}:{line} | {message}",
 )
 
 __all__ = ["logger"]
