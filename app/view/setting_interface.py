@@ -70,7 +70,7 @@ class SettingInterface(Interface):
         self.behaviorGroup = SettingCardGroup("任务行为", self.view)
         self.reconvertCard = SwitchSettingCard(
             FluentIcon.SYNC, "覆盖已转换",
-            "开启后重新转换已成功转换的文件；关闭则自动跳过已完成文件，仅处理待转换/失败项。",
+            "开启后重新解密已成功解密的文件；关闭则自动跳过已解密文件，仅处理待解密/失败项。",
             cfg.reconvert_done, self.behaviorGroup,
         )
         self.behaviorGroup.addSettingCard(self.reconvertCard)

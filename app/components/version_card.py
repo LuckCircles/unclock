@@ -3,11 +3,10 @@
 
 from PySide6.QtCore import QFile, Qt
 from PySide6.QtGui import QPixmap
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout
 from qfluentwidgets import (
     CardWidget,
     CaptionLabel,
-    FlowLayout,
     InfoBadge,
     StrongBodyLabel,
 )
@@ -80,26 +79,3 @@ class VersionCard(CardWidget):
     def _set_badge_state(self, ready: bool):
         self.readyBadge.setVisible(ready)
         self.missBadge.setVisible(not ready)
-
-
-class VersionCardView(QWidget):
-    """Version 卡片流式容器。"""
-
-    def __init__(self, title: str, parent=None):
-        super().__init__(parent)
-        self.titleLabel = StrongBodyLabel(title, self)
-
-        self.vBoxLayout = QVBoxLayout(self)
-        self.flowLayout = FlowLayout()
-
-        self.vBoxLayout.setContentsMargins(0, 0, 0, 0)
-        self.vBoxLayout.setSpacing(8)
-        self.flowLayout.setContentsMargins(0, 0, 0, 0)
-        self.flowLayout.setHorizontalSpacing(12)
-        self.flowLayout.setVerticalSpacing(10)
-
-        self.vBoxLayout.addWidget(self.titleLabel)
-        self.vBoxLayout.addLayout(self.flowLayout, 1)
-
-    def addCard(self, card: QWidget):
-        self.flowLayout.addWidget(card)

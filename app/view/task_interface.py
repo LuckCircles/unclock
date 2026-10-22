@@ -36,7 +36,7 @@ from ..components.task_card import TaskCard
 _CARD_MIN_W = 300
 _H_SPACING = 12
 
-# 卡片排序优先级（值越小越靠上）：待转换 → 转换中 → 失败/跳过 → 已完成
+# 卡片排序优先级（值越小越靠上）：待解密 → 解密中 → 失败/跳过 → 已解密
 _STATUS_ORDER = {
     "pending": 0,
     "running": 1,
@@ -112,7 +112,7 @@ class TaskInterface(Interface):
     # ------------------------------------------------------------ 网格排布
     def _relayout(self):
         """按当前宽度计算列数并重排卡片（宽度均分填满整行）。"""
-        # 先按状态排序：待转换在上、已完成沉底，保持视觉稳定
+        # 先按状态排序：待解密在上、已解密沉底，保持视觉稳定
         self._cards.sort(key=lambda c: _STATUS_ORDER.get(c.status, 9))
         # 摘除现有 item（不销毁 widget）
         while self.gridLayout.count():
@@ -197,11 +197,12 @@ class TaskInterface(Interface):
         self._append_files(paths)
 
     def _remove_completed(self):
-        """移除状态为"已完成"的卡片。"""
+        """移除状态为"已解密"的卡片。"""
         kept = []
         removed = False
         for c in self._cards:
             if c.status == "success":
+                signalBus.queue_remove.emit(c.file_path)
                 c.deleteLater()
                 removed = True
             else:
@@ -212,6 +213,7 @@ class TaskInterface(Interface):
 
     def clear_files(self):
         for c in self._cards:
+            signalBus.queue_remove.emit(c.file_path)
             c.deleteLater()
         self._cards.clear()
         self._relayout()
@@ -258,9 +260,10 @@ class TaskInterface(Interface):
         )
 
     def _remove_card(self, card):
-        """从卡片列表与网格移除单个卡片并刷新。"""
+        """从卡片列表与网格移除单个卡片并刷新；同步从转换队列剔除该文件。"""
         if card in self._cards:
             self._cards.remove(card)
+        signalBus.queue_remove.emit(card.file_path)
         card.deleteLater()
         self._relayout()
 
@@ -312,4 +315,3 @@ class TaskInterface(Interface):
         else:
             self.countLabel.setText(f"共 {count} 个文件")
         self.emptyHint.setVisible(count == 0)
-        signalBus.files_changed.emit(count)

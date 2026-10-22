@@ -37,6 +37,3 @@ class LogInterface(Interface):
         }.get(level, "[DEBUG]")
         self.logText.appendPlainText(f"{tag} {message}")
         self.logText.ensureCursorVisible()
-
-    def clear_log(self):
-        self.logText.clear()

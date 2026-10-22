@@ -31,6 +31,30 @@ def is_already_decrypted(file_path, decrypted_basenames) -> bool:
     return target_basename(Path(file_path).name) in decrypted_basenames
 
 
+def build_input_basenames(input_dir) -> set:
+    """扫描输入目录，返回加密文件的目标基名集合（用于判断输出文件来源）。"""
+    names: set = set()
+    if not input_dir or not os.path.isdir(input_dir):
+        return names
+    try:
+        for name in os.listdir(input_dir):
+            full = os.path.join(input_dir, name)
+            if os.path.isfile(full) and is_encrypted_file(full):
+                names.add(target_basename(name))
+    except OSError:
+        pass
+    return names
+
+
+def output_source_label(file_path, input_basenames) -> str:
+    """判断输出目录音乐文件的来源标签：基名命中加密输入 → 已解密，否则 → 已添加。
+
+    「已解密」= 由本工具从某个加密输入解密产生；「已添加」= 输出目录里原本就有、
+    不对应任何加密输入的音乐文件。
+    """
+    return "已解密" if target_basename(Path(file_path).name) in input_basenames else "已添加"
+
+
 def classify_files(paths, output_dir):
     """把输入文件分为（已解密, 待解密, 跳过的非加密）三组。
 

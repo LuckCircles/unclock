@@ -91,6 +91,19 @@ def is_encrypted_file(path) -> bool:
     return any(lower.endswith(suffix) for suffix in ENCRYPTED_SUFFIXES)
 
 
+# 常见音乐文件后缀（解密结果的输出格式，用于「已解密」页扫描显示）
+MUSIC_SUFFIXES = {
+    ".mp3", ".flac", ".m4a", ".ogg", ".wav", ".wma", ".aac",
+    ".opus", ".ape", ".aiff", ".aif", ".wv", ".m4b",
+}
+
+
+def is_music_file(path) -> bool:
+    """是否为常见音乐文件（解密输出的展示范围）。"""
+    lower = str(path).lower()
+    return any(lower.endswith(suffix) for suffix in MUSIC_SUFFIXES)
+
+
 def target_basename(file_name: str) -> str:
     """去后缀得到目标基名：优先剥掉最长的匹配加密后缀（含 .kgm.flac 复合后缀），
     否则剥掉最后一个扩展名。用于输入/输出目录按文件名比对。"""
@@ -102,13 +115,6 @@ def target_basename(file_name: str) -> str:
     if best:
         return file_name[: len(file_name) - len(best)]
     return Path(file_name).stem
-
-
-def compact_path(path, max_len: int = 80) -> str:
-    normalized = str(path).replace("\\", "/")
-    if len(normalized) <= max_len:
-        return normalized
-    return f"...{normalized[-(max_len - 3):]}"
 
 
 def format_size(size: float) -> str:
@@ -160,12 +166,12 @@ def simplify_process_line(line: str):
     if "successfully converted" in lower_text:
         source = Path(payload.get("source", "")).name or "未知文件"
         destination = Path(payload.get("destination", "")).name or "输出文件"
-        return f"转换成功: {source} -> {destination}", "success"
+        return f"解密成功: {source} -> {destination}", "success"
 
     if "conversion failed" in lower_text:
         source = Path(payload.get("source", "")).name or "未知文件"
         reason = payload.get("error", "未知错误")
-        return f"转换失败: {source} ({reason})", "error"
+        return f"解密失败: {source} ({reason})", "error"
 
     if "run app failed" in lower_text:
         reason = payload.get("error", text)

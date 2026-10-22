@@ -50,10 +50,10 @@ class ToolDetector(QObject):
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
             match = re.search(r"v\d+\.\d+\.\d+", res.stdout)
-            return (match.group(0) if match else "v0.0.0"), True
+            return (match.group(0) if match else "版本未知"), True
         except Exception as exc:  # noqa: BLE001
             logger.debug(f"获取 um 版本失败: {exc}")
-            return "v0.0.0", True
+            return "版本未知", True
 
     def _check_ffmpeg(self):
         path = Path(cfg.ffmpeg_path.value)
@@ -68,10 +68,10 @@ class ToolDetector(QObject):
             )
             line = res.stdout.splitlines()[0] if res.stdout else ""
             match = re.search(r"version\s+(\d+(?:\.\d+)*)", line, re.I)
-            return (match.group(1) if match else "0.0.0"), True
+            return (match.group(1) if match else "版本未知"), True
         except Exception as exc:  # noqa: BLE001
             logger.debug(f"获取 ffmpeg 版本失败: {exc}")
-            return "0.0.0", True
+            return "版本未知", True
 
     def _check_qmpc(self):
         path = Path(cfg.qmpc_path.value)
@@ -86,7 +86,7 @@ class ToolDetector(QObject):
             )
             output = res.stderr or res.stdout
             match = re.search(r"v\d+\.\d+\.\d+", output)
-            return (match.group(0) if match else "v0.0.0"), True
+            return (match.group(0) if match else "版本未知"), True
         except Exception as exc:  # noqa: BLE001
             logger.debug(f"获取 qmpc-mmkv-cli 版本失败: {exc}")
-            return "v0.0.0", True
+            return "版本未知", True

@@ -27,3 +27,5 @@ examples/
 example/
 !examples/.keep
 !example/.keep
+.gitignore
+启动程序.bat

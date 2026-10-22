@@ -108,7 +108,7 @@ class HomeInterface(Interface):
 
         self.progressText = CaptionLabel("就绪", self)
         self.progressBar = ProgressBar(self)
-        self.btnAction = PrimaryPushButton(FluentIcon.PLAY, "开始转换", self)
+        self.btnAction = PrimaryPushButton(FluentIcon.PLAY, "开始解密", self)
         self.btnAction.setFixedSize(160, 36)
 
         self.controlLayout.addWidget(self.progressText, 0, Qt.AlignVCenter)
@@ -209,7 +209,7 @@ class HomeInterface(Interface):
 
         if state == "running":
             self.btnAction.setEnabled(True)
-            self.btnAction.setText("停止转换")
+            self.btnAction.setText("停止解密")
             self.btnAction.setIcon(FluentIcon.CANCEL)
             return
 
@@ -220,5 +220,5 @@ class HomeInterface(Interface):
             return
 
         self.btnAction.setEnabled(True)
-        self.btnAction.setText("开始转换")
+        self.btnAction.setText("开始解密")
         self.btnAction.setIcon(FluentIcon.PLAY)

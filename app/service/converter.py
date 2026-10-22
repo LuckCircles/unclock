@@ -1,8 +1,8 @@
 # coding: utf-8
-"""转换服务 —— 封装 um.exe 进程调用与批量任务队列。
+"""解密服务 —— 封装 um.exe 进程调用与批量任务队列。
 
 view 层通过 ``signalBus.request_start`` / ``request_stop`` 驱动本服务，
-本服务经 ``signalBus`` 反向广播转换事件（file_started / file_finished /
+本服务经 ``signalBus`` 反向广播解密事件（file_started / file_finished /
 log_emitted / conversion_started / conversion_finished），实现 view 与
 service 解耦。
 """
@@ -66,6 +66,8 @@ class UnlockMusicConverter(QObject):
         # request_start 不直连本服务：由 MainWindow._dispatch_start 统一取文件列表后调用
         # start(files)，否则 files=None 的空队列路径会先弹"没有可转换文件"假警告
         signalBus.request_stop.connect(self.stop)
+        # 任务页移除/删除排队中的文件时，同步从待处理队列剔除（解密不管理已移出列表的文件）
+        signalBus.queue_remove.connect(self._remove_from_queue)
 
     # ------------------------------------------------------------- 公共 API
     def start(self, files=None):
@@ -83,22 +85,22 @@ class UnlockMusicConverter(QObject):
             signalBus.log_emitted.emit("未找到 um.exe，请在配置界面设置路径。", "error")
             signalBus.toast_requested.emit("未找到 um.exe，请在配置界面设置路径。", "error")
             signalBus.conversion_finished.emit(-1)
-            logger.error(f"转换启动失败: um.exe 不存在 {cfg.um_path.value}")
+            logger.error(f"解密启动失败: um.exe 不存在 {cfg.um_path.value}")
             return
 
         if not self.pending_files:
             signalBus.log_emitted.emit("没有可解密的加密文件。", "warning")
             signalBus.toast_requested.emit("没有可解密的加密文件。", "warning")
             signalBus.conversion_finished.emit(-1)
-            logger.warning("转换启动失败: 没有可解密的加密文件")
+            logger.warning("解密启动失败: 没有可解密的加密文件")
             return
 
         self._ok_count = 0
         self._fail_count = 0
         signalBus.conversion_started.emit(len(self.pending_files))
-        logger.info(f"开始转换任务: {len(self.pending_files)} 个文件")
+        logger.info(f"开始解密任务: {len(self.pending_files)} 个文件")
         signalBus.log_emitted.emit(
-            f"准备处理 {len(self.pending_files)} 个受支持文件。", "info"
+            f"准备解密 {len(self.pending_files)} 个文件。", "info"
         )
         self._start_next_file()
 
@@ -109,22 +111,44 @@ class UnlockMusicConverter(QObject):
             self._handled = True
             self.process.kill()
             signalBus.log_emitted.emit("正在停止任务...", "warning")
-            signalBus.toast_requested.emit("已停止转换。", "warning")
-            logger.warning("用户请求停止转换任务")
+            signalBus.toast_requested.emit("已停止解密。", "warning")
+            logger.warning("用户请求停止解密任务")
         # 复位按钮态（用户停止或退出清理时都回到 idle）
         signalBus.conversion_finished.emit(0)
+
+    def _remove_from_queue(self, path: str):
+        """把指定文件从待处理队列剔除（用户在任务页移出列表/删除时调用）。
+
+        仅影响尚未开始的排队文件；正在处理的无从回退。
+        """
+        if path in self.pending_files:
+            self.pending_files.remove(path)
+            logger.info(f"已从待处理队列移除: {Path(path).name}")
 
     # ----------------------------------------------------------------- 内部
     def _start_next_file(self):
         if not self.pending_files:
             self.current_file = None
             self._handled = True
-            signalBus.log_emitted.emit("全部转换任务已完成。", "success")
+            signalBus.log_emitted.emit("全部解密任务已完成。", "success")
             signalBus.conversion_finished.emit(0)
             return
 
         self.current_file = self.pending_files.pop(0)
         self._handled = False
+        # 排队期间被删除/移走的文件（含用户在任务页移除、或外部删除）：跳过，
+        # 不计失败；仍发 file_finished 推进进度条，然后继续后续文件。
+        if not os.path.exists(self.current_file):
+            missing = self.current_file
+            self.current_file = None
+            self._handled = True
+            signalBus.file_finished.emit(missing, False)
+            signalBus.log_emitted.emit(
+                f"跳过（文件不存在）: {Path(missing).name}", "warning"
+            )
+            logger.info(f"跳过不存在的文件: {missing}")
+            self._continue_internal()
+            return
         args = self._build_file_args(self.current_file)
         signalBus.file_started.emit(self.current_file)
         signalBus.log_emitted.emit(
@@ -236,14 +260,14 @@ class UnlockMusicConverter(QObject):
         else:
             self._fail_count += 1
             signalBus.log_emitted.emit(
-                f"{name} 转换失败（退出码 {exit_code}），已记录并跳过，继续后续文件。",
+                f"{name} 解密失败（退出码 {exit_code}），已记录并跳过，继续后续文件。",
                 "error",
             )
             # 单文件失败：浮层提示（跳过并继续，不中断整批）
             signalBus.toast_requested.emit(
-                f"{name} 转换失败，已跳过并继续。", "error"
+                f"{name} 解密失败，已跳过并继续。", "error"
             )
-            logger.warning(f"文件转换失败（跳过）: {name} 退出码={exit_code}")
+            logger.warning(f"文件解密失败（跳过）: {name} 退出码={exit_code}")
 
         self._continue_internal()
 
@@ -256,16 +280,16 @@ class UnlockMusicConverter(QObject):
             return
 
         total = self._ok_count + self._fail_count
-        signalBus.log_emitted.emit("全部文件处理完毕。", "success")
-        logger.info(f"转换任务全部结束 成功={self._ok_count} 失败={self._fail_count}")
+        signalBus.log_emitted.emit("全部文件解密完毕。", "success")
+        logger.info(f"解密任务全部结束 成功={self._ok_count} 失败={self._fail_count}")
         # 整批结束浮层汇总：全部成功→success；有失败→warning
         if self._fail_count:
             signalBus.toast_requested.emit(
-                f"转换结束：成功 {self._ok_count} 个，失败 {self._fail_count} 个。",
+                f"解密结束：成功 {self._ok_count} 个，失败 {self._fail_count} 个。",
                 "warning",
             )
         else:
             signalBus.toast_requested.emit(
-                f"全部转换完成：{total} 个文件。", "success"
+                f"全部解密完成：{total} 个文件。", "success"
             )
         signalBus.conversion_finished.emit(0)

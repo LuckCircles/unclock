@@ -36,7 +36,7 @@ class TaskCard(CardWidget):
         self._badge = None
 
         # 固定高度、宽度自适应拉伸（网格均分填满整行）：
-        # 高度固定保证 FlowLayout/Grid 行高与实际渲染一致，不重叠
+        # 高度固定保证网格行高与实际渲染一致，不重叠
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setMinimumWidth(300)
         self.setFixedHeight(64)
@@ -49,13 +49,13 @@ class TaskCard(CardWidget):
         self.textLayout.setSpacing(2)
         self.textLayout.setContentsMargins(0, 0, 0, 0)
 
-        # 文件名用跑马灯：拉伸填满左侧，过长时悬停整张卡片即从左往右滚动展示完整文件名
+        # 文件名用跑马灯：拉伸填满左侧，过长时悬停整张卡片即首尾相连无缝滚动展示完整文件名
         # （MarqueeLabel 水平策略为 Ignored：不撑宽网格列，列宽保持一致）
         self.nameLabel = MarqueeLabel(os.path.basename(file_path), self)
         self.nameLabel.setMinimumWidth(0)
         self.nameLabel.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
-        # 单行省略号，避免长路径换行撑高卡片导致 FlowLayout 重叠
+        # 单行省略号，避免文本换行撑高卡片导致网格行高不一致
         self.metaLabel = CaptionLabel(self._meta_text(file_path), self)
         self.metaLabel.setWordWrap(False)
         self.metaLabel.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Minimum)
@@ -83,16 +83,21 @@ class TaskCard(CardWidget):
         if status not in _STATUS_META:
             return
         self._status = status
-        # 重建徽章以切换颜色与文本；先从布局移除旧徽章再销毁，
-        # 避免 deleteLater 延迟生效导致新旧徽章同帧叠加闪烁
+        method, text = _STATUS_META[status]
+        self.set_badge(text, method)
+
+    def set_badge(self, text: str, kind: str = "info"):
+        """设置任意文本徽章（kind: info / success / warning）。
+
+        先移除旧徽章再销毁，避免 deleteLater 延迟生效导致新旧徽章同帧叠加闪烁。
+        """
         if self._badge is not None:
             self.hLayout.removeWidget(self._badge)
             self._badge.deleteLater()
             self._badge = None
-        method, text = _STATUS_META[status]
-        if method == "success":
+        if kind == "success":
             self._badge = InfoBadge.success(text, parent=self)
-        elif method == "warning":
+        elif kind == "warning":
             self._badge = InfoBadge.warning(text, parent=self)
         else:
             self._badge = InfoBadge.info(text, parent=self)

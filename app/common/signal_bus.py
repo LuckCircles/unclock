@@ -22,14 +22,12 @@ class SignalBus(QObject):
     log_emitted = Signal(str, str)          # message, level
     toast_requested = Signal(str, str)      # message, level（请求首页弹 InfoBar 浮层）
 
-    # ===== 文件管理（task_interface → 外部） =====
-    files_changed = Signal(int)             # file count
-
     # ===== 工具检测（service → home） =====
     tools_detected = Signal(str, bool, str, bool, str, bool)  # um_ver, um_ready, ff_ver, ff_ready, qmpc_ver, qmpc_ready
 
-    # ===== 路径变更（config → 首页/任务页） =====
-    paths_changed = Signal()
+    # ===== 路径变更 / 队列管理 =====
+    paths_changed = Signal()                # 输入/输出目录变更
+    queue_remove = Signal(str)              # file_path（从解密待处理队列移除，移交出列表/删除）
 
 
 signalBus = SignalBus()

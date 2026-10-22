@@ -1,7 +1,10 @@
 # coding: utf-8
-"""已解密文件页面 —— 卡片网格展示输出目录中已解密的文件。
+"""已解密文件页面 —— 卡片网格展示输出目录中的音乐文件。
 
-支持：顶部搜索栏快速过滤、右键卡片播放 / 删除文件（删除带确认）、刷新 / 打开目录。
+按来源打标签：由本工具从加密输入解密产生 → 「已解密」（绿）；输出目录原本就有、
+不对应任何加密输入 → 「已添加」（黄）。只扫描常见音乐文件类型。
+支持：顶部分类下拉框（全部/已解密/已添加）与搜索栏过滤、右键卡片播放 / 删除
+文件（删除带确认）、刷新 / 打开目录。
 """
 
 import os
@@ -13,6 +16,7 @@ from qfluentwidgets import (
     Action,
     CaptionLabel,
     CardWidget,
+    ComboBox,
     FluentIcon,
     MessageBox,
     RoundMenu,
@@ -21,9 +25,10 @@ from qfluentwidgets import (
 )
 
 from ..common.config import cfg
+from ..common.decrypt_scanner import build_input_basenames, output_source_label
 from ..common.logger import logger
 from ..common.signal_bus import signalBus
-from ..common.utils import is_supported_file
+from ..common.utils import is_music_file
 from ..components.empty_status import EmptyStatusWidget
 from ..components.interface import Interface
 from ..components.task_card import TaskCard
@@ -49,16 +54,21 @@ class DecryptedInterface(Interface):
         self.toolbarLayout.setContentsMargins(15, 12, 15, 12)
         self.toolbarLayout.setSpacing(10)
 
-        self.countLabel = CaptionLabel("0 个已解密文件", self)
+        self.countLabel = CaptionLabel("0 个音乐文件", self)
         self.searchEdit = SearchLineEdit(self)
-        self.searchEdit.setPlaceholderText("搜索已解密文件")
+        self.searchEdit.setPlaceholderText("搜索音乐文件")
         self.searchEdit.setFixedWidth(240)
+        # 分类下拉框：全部 / 已解密 / 已添加
+        self.filterCombo = ComboBox(self)
+        self.filterCombo.addItems(["全部", "已解密", "已添加"])
+        self.filterCombo.setFixedWidth(104)
         self.btnRefresh = TransparentPushButton(FluentIcon.SYNC, "刷新列表", self)
         self.btnOpenDir = TransparentPushButton(FluentIcon.FOLDER, "打开目录", self)
 
         self.toolbarLayout.addWidget(self.countLabel)
         self.toolbarLayout.addStretch(1)
         self.toolbarLayout.addWidget(self.searchEdit)
+        self.toolbarLayout.addWidget(self.filterCombo)
         self.toolbarLayout.addWidget(self.btnRefresh)
         self.toolbarLayout.addWidget(self.btnOpenDir)
 
@@ -86,6 +96,7 @@ class DecryptedInterface(Interface):
         self.btnRefresh.clicked.connect(self.refresh)
         self.btnOpenDir.clicked.connect(self._open_output_dir)
         self.searchEdit.textChanged.connect(self._on_search)
+        self.filterCombo.currentIndexChanged.connect(lambda *_: self._relayout())
         # 输出目录变更 / 一批解密结束 → 刷新已解密列表
         signalBus.paths_changed.connect(self.refresh)
         signalBus.conversion_finished.connect(lambda *_: self.refresh())
@@ -99,11 +110,17 @@ class DecryptedInterface(Interface):
 
     # ------------------------------------------------------------ 网格排布
     def _visible_cards(self):
-        """按当前搜索词过滤卡片（匹配文件名，大小写不敏感）。"""
+        """按分类下拉（全部/已解密/已添加）+ 搜索词过滤卡片。"""
         q = self._filter.strip().lower()
-        if not q:
-            return list(self._cards)
-        return [c for c in self._cards if q in os.path.basename(c.file_path).lower()]
+        cat = self.filterCombo.currentText()
+        result = []
+        for c in self._cards:
+            if cat != "全部" and getattr(c, "_source", None) != cat:
+                continue
+            if q and q not in os.path.basename(c.file_path).lower():
+                continue
+            result.append(c)
+        return result
 
     def _relayout(self):
         """按当前宽度计算列数并重排（仅可见卡片），宽度均分填满整行。"""
@@ -129,33 +146,39 @@ class DecryptedInterface(Interface):
 
     # ------------------------------------------------------------ 文件操作
     def refresh(self):
-        """扫描输出目录，列出已解密文件（按修改时间倒序）。"""
+        """扫描输出目录的音乐文件，按来源打标签（已解密 / 已添加，按修改时间倒序）。"""
         out = cfg.output_dir.value
         matched = []
+        # 输入目录加密文件基名集合：用于判断输出文件是解密产生还是原本就有
+        input_basenames = build_input_basenames(cfg.input_dir.value)
         if not out:
             self._empty_msg = "尚未设置输出目录，请到配置界面设置"
         elif not os.path.isdir(out):
             self._empty_msg = "输出目录不存在"
         else:
-            self._empty_msg = "输出目录暂无已解密文件"
+            self._empty_msg = "输出目录暂无音乐文件"
             try:
                 for name in os.listdir(out):
                     full = os.path.join(out, name)
-                    if os.path.isfile(full) and is_supported_file(full):
+                    # 只扫描常见音乐文件类型；跳过封面/非音乐等
+                    if os.path.isfile(full) and is_music_file(full):
                         matched.append(full)
             except OSError:
                 matched = []
             matched.sort(key=lambda p: os.path.getmtime(p), reverse=True)
-        self._replace_files(matched)
+        self._replace_files(matched, input_basenames)
 
-    def _replace_files(self, paths):
+    def _replace_files(self, paths, input_basenames):
         for c in self._cards:
             c.deleteLater()
         self._cards.clear()
         for path in paths:
             card = TaskCard(path, self)
-            card.set_status("success")   # 已解密徽章
-            # 右键菜单：删除文件
+            # 来源标签：由本工具解密 → 已解密（绿）；输出目录原本就有 → 已添加（黄）
+            label = output_source_label(path, input_basenames)
+            card._source = label
+            card.set_badge(label, "success" if label == "已解密" else "warning")
+            # 右键菜单：播放 / 删除
             card.setContextMenuPolicy(Qt.CustomContextMenu)
             card.customContextMenuRequested.connect(
                 lambda pos, c=card: self._show_card_menu(c, pos)
@@ -218,10 +241,19 @@ class DecryptedInterface(Interface):
     def _update_count(self):
         visible = self._visible_cards()
         total = len(self._cards)
+        # 来源分布：已解密 / 已添加
+        dec = sum(1 for c in visible if getattr(c, "_source", None) == "已解密")
+        add = len(visible) - dec
+        parts = []
+        if dec:
+            parts.append(f"已解密 {dec}")
+        if add:
+            parts.append(f"已添加 {add}")
+        summary = " · ".join(parts) if parts else "0"
         if self._filter.strip() and total != len(visible):
-            self.countLabel.setText(f"{len(visible)} / {total} 个已解密文件")
+            self.countLabel.setText(f"{summary} · 匹配 {len(visible)}/{total}")
         else:
-            self.countLabel.setText(f"{total} 个已解密文件")
+            self.countLabel.setText(f"{summary} · 共 {total}")
         if not visible:
             if self._filter.strip() and total > 0:
                 self.emptyHint.label.setText(f"未找到与“{self._filter.strip()}”匹配的文件")
