@@ -1,13 +1,18 @@
 # coding: utf-8
-"""任务管理页面 —— 卡片式待转换文件列表（网格均分填充）。"""
+"""任务管理页面 —— 卡片式待转换文件列表（网格均分填充）。
+
+支持：添加文件 / 刷新列表 / 拖入文件（文件或目录，目录取顶层）/ 删除 / 清空；
+只纳入加密音乐文件（明文音频等非加密文件跳过）。
+"""
 
 import os
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QFileDialog,
     QGridLayout,
     QHBoxLayout,
+    QLabel,
     QVBoxLayout,
 )
 from qfluentwidgets import (
@@ -18,6 +23,7 @@ from qfluentwidgets import (
     MessageBox,
     RoundMenu,
     TransparentPushButton,
+    qconfig,
 )
 
 from ..common.config import cfg
@@ -35,6 +41,8 @@ from ..components.task_card import TaskCard
 # 网格布局参数：卡片最小宽 + 水平间距，用于计算列数
 _CARD_MIN_W = 300
 _H_SPACING = 12
+# 启动分批建卡：每批卡片数（批间让出事件循环，窗口先出、卡片渐进填充不假死）
+_CHUNK = 40
 
 # 卡片排序优先级（值越小越靠上）：待解密 → 解密中 → 失败/跳过 → 已解密
 _STATUS_ORDER = {
@@ -52,6 +60,9 @@ class TaskInterface(Interface):
     def __init__(self, parent=None):
         super().__init__("TaskInterface", parent)
         self._cards: list[TaskCard] = []
+
+        # 支持拖入文件（文件/目录）——ScrollArea 子控件默认不接收拖拽，事件统一冒泡到本页
+        self.setAcceptDrops(True)
 
         # 顶部工具栏卡片
         self.toolbarCard = CardWidget(self)
@@ -79,7 +90,9 @@ class TaskInterface(Interface):
         self.listLayout.setContentsMargins(15, 15, 15, 15)
         self.listLayout.setSpacing(10)
 
-        self.emptyHint = EmptyStatusWidget("暂无文件，点击“添加文件”或刷新列表", self)
+        self.emptyHint = EmptyStatusWidget(
+            "暂无文件，点击“添加文件”、刷新列表，或直接拖入文件", self
+        )
         self.gridLayout = QGridLayout()
         self.gridLayout.setContentsMargins(0, 0, 0, 0)
         self.gridLayout.setHorizontalSpacing(_H_SPACING)
@@ -90,6 +103,12 @@ class TaskInterface(Interface):
         # 垂直居中漂浮，出现上方大片空白——故此处不给 grid 拉伸，改在末尾加 stretch。
         self.listLayout.addLayout(self.gridLayout)
         self.listLayout.addStretch(1)
+
+        # 拖入提示浮层：拖文件经过时盖在列表区上方（对鼠标透明，不拦正常操作）
+        self.dropHint = QLabel("松开鼠标，添加至任务列表", self.listCard)
+        self.dropHint.setAlignment(Qt.AlignCenter)
+        self.dropHint.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.dropHint.hide()
 
         self.vLayout.addWidget(self.listCard, 1)
 
@@ -102,12 +121,108 @@ class TaskInterface(Interface):
         signalBus.file_finished.connect(self._on_file_finished)
         signalBus.paths_changed.connect(self.refresh_from_config)
 
-        self.refresh_from_config()
+        # 启动不同步建卡：延后到事件循环首轮，并分批渐进填充——
+        # 数百张卡的输入目录会把启动拖死数秒，现在窗口先出、卡片随后流式出现
+        QTimer.singleShot(0, self._startup_scan)
 
     def resizeEvent(self, e):
         """页面尺寸变化时按新宽度重排列数，卡片保持填充。"""
         super().resizeEvent(e)
+        # 拖入提示浮层跟随列表卡片尺寸
+        self.dropHint.setGeometry(self.listCard.rect())
         self._relayout()
+
+    # ------------------------------------------------------------ 拖入文件
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+            self._show_drop_hint(True)
+        else:
+            # 非文件拖入：收起提示（防御 leave 事件偶发不达导致高亮残留）
+            self._show_drop_hint(False)
+            e.ignore()
+
+    def dragMoveEvent(self, e):
+        # 拖动过程中持续确认（工具栏按钮/卡片均不接收拖拽，事件冒泡到本页）
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+        else:
+            self._show_drop_hint(False)
+            e.ignore()
+
+    def dragLeaveEvent(self, e):
+        self._show_drop_hint(False)
+        e.accept()
+
+    def dropEvent(self, e):
+        self._show_drop_hint(False)
+        paths = self._collect_drop_paths(e)
+        if not paths:
+            signalBus.toast_requested.emit("未识别到本地文件或目录。", "warning")
+            e.acceptProposedAction()
+            return
+        r = self._append_files(paths)
+        added, dup, invalid = r["added"], r["duplicate"], r["invalid"]
+        if added:
+            skipped = []
+            if dup:
+                skipped.append(f"重复 {dup} 个")
+            if invalid:
+                skipped.append(f"非加密 {invalid} 个")
+            msg = f"已拖入添加 {added} 个文件"
+            if skipped:
+                msg += "（跳过 " + "、".join(skipped) + "）"
+            signalBus.toast_requested.emit(msg, "success")
+            signalBus.log_emitted.emit(
+                f"拖入添加 {added} 个文件（重复 {dup}、非加密 {invalid}）", "success"
+            )
+        elif dup and not invalid:
+            signalBus.toast_requested.emit("拖入的文件已在列表中。", "warning")
+        elif invalid and not dup:
+            signalBus.toast_requested.emit("未找到可解密的加密音乐文件。", "warning")
+        else:
+            signalBus.toast_requested.emit(
+                "拖入的文件均不可解密或已在列表中。", "warning"
+            )
+        e.acceptProposedAction()
+
+    def _collect_drop_paths(self, e) -> list[str]:
+        """收集拖入的本地文件：文件直接纳入；目录取其顶层文件（与目录扫描一致，不递归）。
+
+        路径统一 ``normpath`` 规范化：``QUrl.toLocalFile()`` 返回正斜杠路径，与
+        文件对话框 / 目录扫描的反斜杠原生路径字符串不同，不去重会出现同一文件两张卡。
+        """
+        paths = []
+        for url in e.mimeData().urls():
+            if not url.isLocalFile():
+                continue
+            local = os.path.normpath(url.toLocalFile())
+            if os.path.isdir(local):
+                try:
+                    for name in os.listdir(local):
+                        full = os.path.join(local, name)
+                        if os.path.isfile(full):
+                            paths.append(full)
+                except OSError:
+                    continue
+            elif os.path.isfile(local):
+                paths.append(local)
+        return paths
+
+    def _show_drop_hint(self, show: bool):
+        """拖入经过时在列表区显示提示浮层（主题色半透明底 + 虚线框）。"""
+        if show:
+            self.dropHint.setGeometry(self.listCard.rect())
+            if not self.dropHint.isVisible():
+                c = qconfig.themeColor.value
+                self.dropHint.setStyleSheet(
+                    f"background: rgba({c.red()}, {c.green()}, {c.blue()}, 90);"
+                    f"border: 2px dashed rgba({c.red()}, {c.green()}, {c.blue()}, 220);"
+                    "border-radius: 8px;"
+                    "color: white; font-size: 16px; font-weight: 500;"
+                )
+                self.dropHint.raise_()
+        self.dropHint.setVisible(show)
 
     # ------------------------------------------------------------ 网格排布
     def _relayout(self):
@@ -142,7 +257,13 @@ class TaskInterface(Interface):
         if input_dir and os.path.exists(input_dir):
             self.scan_directory(input_dir)
 
-    def scan_directory(self, path: str):
+    def _startup_scan(self):
+        """启动时的首次扫描：分批建卡（ progressive ），避免长列表卡住界面。"""
+        input_dir = cfg.input_dir.value
+        if input_dir and os.path.exists(input_dir):
+            self.scan_directory(input_dir, progressive=True)
+
+    def scan_directory(self, path: str, progressive: bool = False):
         if not path or not os.path.exists(path):
             return
         matched = []
@@ -154,7 +275,36 @@ class TaskInterface(Interface):
                     matched.append(full)
         except OSError:
             return
-        self._replace_files(matched)
+        if progressive:
+            self._replace_files_progressive(matched)
+        else:
+            self._replace_files(matched)
+
+    def _replace_files_progressive(self, paths):
+        """分批建卡：清空后先空排一次确定列数，随后每 _CHUNK 张卡让出一次事件循环。"""
+        for c in self._cards:
+            c.deleteLater()
+        self._cards.clear()
+        self._relayout()
+        self._pending_paths = list(paths)
+        self._fill_next_chunk()
+
+    def _fill_next_chunk(self):
+        if not self._pending_paths:
+            return
+        batch, self._pending_paths = (
+            self._pending_paths[:_CHUNK],
+            self._pending_paths[_CHUNK:],
+        )
+        start = len(self._cards)
+        self._append_files(batch, relayout=False)
+        # 只把本批新增卡片补进网格末尾（列数未变时与全量重排等价，避免 O(n²) 重排）
+        cols = getattr(self, "_grid_cols", 1) or 1
+        for i, card in enumerate(self._cards[start:]):
+            self.gridLayout.addWidget(card, (start + i) // cols, (start + i) % cols)
+        self._update_count()
+        if self._pending_paths:
+            QTimer.singleShot(0, self._fill_next_chunk)
 
     def _add_files(self):
         files, _ = QFileDialog.getOpenFileNames(
@@ -162,17 +312,32 @@ class TaskInterface(Interface):
         )
         if not files:
             return
-        if not self._append_files(files):
+        if not self._append_files(files)["added"]:
             signalBus.toast_requested.emit("未选择可解密的加密音乐文件。", "warning")
 
-    def _append_files(self, paths):
+    def _append_files(self, paths, relayout: bool = True) -> dict:
+        """追加文件到任务列表，返回分类计数 ``{added, duplicate, invalid}``。
+
+        路径先 ``normpath`` 规范化再比对，避免拖入（正斜杠）与对话框/扫描
+        （反斜杠）同一文件字符串不一致导致去重失效。
+        - added：实际新增卡片数；
+        - duplicate：因已在列表被跳过数；
+        - invalid：非加密文件被跳过数。
+
+        ``relayout=False`` 时不重排网格（供分批建卡调用方自行增量补格）。
+        """
         existing = {card.file_path for card in self._cards}
         # 输入/输出目录对比：扫描输出目录建已解密基名集合
         decrypted_names = build_decrypted_basenames(cfg.output_dir.value)
-        added = False
+        result = {"added": 0, "duplicate": 0, "invalid": 0}
         for path in paths:
+            path = os.path.normpath(path)
             # 非加密文件跳过；仅纳入加密音乐文件
-            if not is_encrypted_file(path) or path in existing:
+            if not is_encrypted_file(path):
+                result["invalid"] += 1
+                continue
+            if path in existing:
+                result["duplicate"] += 1
                 continue
             existing.add(path)
             card = TaskCard(path, self)
@@ -185,10 +350,10 @@ class TaskInterface(Interface):
                 lambda pos, c=card: self._show_card_menu(c, pos)
             )
             self._cards.append(card)
-            added = True
-        if added:
+            result["added"] += 1
+        if result["added"] and relayout:
             self._relayout()
-        return added
+        return result
 
     def _replace_files(self, paths):
         for c in self._cards:

@@ -5,15 +5,38 @@ import re
 import subprocess
 from pathlib import Path
 
-from PySide6.QtCore import QObject
+from PySide6.QtCore import QObject, QRunnable, QThreadPool
 
 from ..common.config import cfg
 from ..common.logger import logger
 from ..common.signal_bus import signalBus
 
 
+class _DetectTask(QRunnable):
+    """线程池任务：在后台线程执行一次 ``ToolDetector.detect``。
+
+    ``detect`` 内只做子进程调用与信号广播——signalBus 接收方均在 UI 线程，
+    跨线程发送自动转为队列连接，安全无锁。
+    """
+
+    def __init__(self, detector: "ToolDetector"):
+        super().__init__()
+        self._detector = detector
+
+    def run(self):
+        try:
+            self._detector.detect()
+        except RuntimeError as exc:
+            # 启动后极短窗口内退出时，解释器拆解可能与信号广播竞态
+            # （Signal source has been deleted）——此时结果已无人接收，安全忽略
+            logger.debug(f"工具检测任务异常退出（可能为退出竞态）: {exc}")
+
+
 class ToolDetector(QObject):
     """检测 um.exe / ffmpeg.exe / qmpc-mmkv-cli.exe 是否存在并解析其版本号。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
 
     def detect(self):
         logger.info("开始工具链自动检测")
@@ -37,6 +60,10 @@ class ToolDetector(QObject):
         signalBus.tools_detected.emit(
             um_ver, um_ready, ff_ver, ff_ready, qmpc_ver, qmpc_ready
         )
+
+    def detect_async(self):
+        """后台线程池执行检测：不占用启动关键路径，结果经信号总线异步更新界面。"""
+        QThreadPool.globalInstance().start(_DetectTask(self))
 
     def _check_um(self):
         path = Path(cfg.um_path.value)

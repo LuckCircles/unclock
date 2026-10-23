@@ -64,7 +64,9 @@ class VersionCard(CardWidget):
         self.hLayout.addWidget(self.readyBadge, 0, Qt.AlignTop)
         self.hLayout.addWidget(self.missBadge, 0, Qt.AlignTop)
 
-        self._set_badge_state(False)
+        # 初始 neutral：后台检测结果到达前两个徽章都隐藏（避免启动瞬间闪 MISS）
+        self.readyBadge.setVisible(False)
+        self.missBadge.setVisible(False)
 
     def update_info(self, version: str, ready: bool = True):
         value = version
@@ -75,6 +77,12 @@ class VersionCard(CardWidget):
 
         self.nameVersionLabel.setText(f"{self.base_title} {value}")
         self._set_badge_state(ready)
+
+    def set_detecting(self):
+        """检测中状态：显示提示文本，徽章 neutral（后台检测结果到达前不亮灯）。"""
+        self.nameVersionLabel.setText(f"{self.base_title} 检测中...")
+        self.readyBadge.setVisible(False)
+        self.missBadge.setVisible(False)
 
     def _set_badge_state(self, ready: bool):
         self.readyBadge.setVisible(ready)

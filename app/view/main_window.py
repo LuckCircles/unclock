@@ -45,8 +45,10 @@ class MainWindow(MSFluentWindow):
 
         # 首次刷新与工具检测
         self.homeInterface.refresh_paths()
-        self.taskInterface.refresh_from_config()
-        self.detector.detect()
+        # 任务页/已解密页的首次建卡由各自界面延后执行（启动关键路径只留窗口骨架）：
+        # 任务页 __init__ 内 singleShot 分批渐进扫描；已解密页首次切入时才建卡。
+        # 工具检测移入后台线程池：不阻塞启动，结果经信号总线异步更新首页卡片。
+        self.detector.detect_async()
 
     def init_navigation(self):
         self.addSubInterface(self.homeInterface, FluentIcon.HOME, "主界面")

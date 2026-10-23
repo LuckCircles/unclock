@@ -9,7 +9,7 @@
 
 import os
 
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import Qt, QUrl, QTimer
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QVBoxLayout
 from qfluentwidgets import (
@@ -36,6 +36,8 @@ from ..components.task_card import TaskCard
 # 网格布局参数：卡片最小宽 + 水平间距，用于计算列数
 _CARD_MIN_W = 300
 _H_SPACING = 12
+# 启动分批建卡：每批卡片数（批间让出事件循环，切页先出、卡片渐进填充不假死）
+_CHUNK = 40
 
 
 class DecryptedInterface(Interface):
@@ -101,7 +103,16 @@ class DecryptedInterface(Interface):
         signalBus.paths_changed.connect(self.refresh)
         signalBus.conversion_finished.connect(lambda *_: self.refresh())
 
-        self.refresh()
+        # 不在构造时建卡：本页不在首页，首次切进来再分批渐进填充——
+        # 启动阶段省掉这数百张卡的构建；期间 paths_changed 触发的 refresh 会
+        # 同步建卡并置位 _filled_once，避免首次显示时重复劳动
+        self._filled_once = False
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        if not self._filled_once:
+            self._filled_once = True
+            QTimer.singleShot(0, self._startup_fill)
 
     def resizeEvent(self, e):
         """页面尺寸变化时按新宽度重排列数，卡片保持填充。"""
@@ -145,8 +156,8 @@ class DecryptedInterface(Interface):
         self._update_count()
 
     # ------------------------------------------------------------ 文件操作
-    def refresh(self):
-        """扫描输出目录的音乐文件，按来源打标签（已解密 / 已添加，按修改时间倒序）。"""
+    def _scan_output(self):
+        """扫描输出目录音乐文件 + 输入基名集合，返回 ``(paths, input_basenames)``。"""
         out = cfg.output_dir.value
         matched = []
         # 输入目录加密文件基名集合：用于判断输出文件是解密产生还是原本就有
@@ -166,25 +177,63 @@ class DecryptedInterface(Interface):
             except OSError:
                 matched = []
             matched.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        return matched, input_basenames
+
+    def refresh(self):
+        """扫描输出目录的音乐文件，按来源打标签（已解密 / 已添加，按修改时间倒序）。"""
+        matched, input_basenames = self._scan_output()
+        self._filled_once = True
         self._replace_files(matched, input_basenames)
+
+    def _startup_fill(self):
+        """首次显示本页：分批建卡，批间让出事件循环，避免长列表卡住界面。"""
+        matched, input_basenames = self._scan_output()
+        self._replace_files_progressive(matched, input_basenames)
+
+    def _make_card(self, path, input_basenames):
+        """构建单张文件卡片并按来源打标签（已解密绿 / 已添加黄）。"""
+        card = TaskCard(path, self)
+        label = output_source_label(path, input_basenames)
+        card._source = label
+        card.set_badge(label, "success" if label == "已解密" else "warning")
+        # 右键菜单：播放 / 删除
+        card.setContextMenuPolicy(Qt.CustomContextMenu)
+        card.customContextMenuRequested.connect(
+            lambda pos, c=card: self._show_card_menu(c, pos)
+        )
+        return card
 
     def _replace_files(self, paths, input_basenames):
         for c in self._cards:
             c.deleteLater()
         self._cards.clear()
         for path in paths:
-            card = TaskCard(path, self)
-            # 来源标签：由本工具解密 → 已解密（绿）；输出目录原本就有 → 已添加（黄）
-            label = output_source_label(path, input_basenames)
-            card._source = label
-            card.set_badge(label, "success" if label == "已解密" else "warning")
-            # 右键菜单：播放 / 删除
-            card.setContextMenuPolicy(Qt.CustomContextMenu)
-            card.customContextMenuRequested.connect(
-                lambda pos, c=card: self._show_card_menu(c, pos)
-            )
-            self._cards.append(card)
+            self._cards.append(self._make_card(path, input_basenames))
         self._relayout()
+
+    def _replace_files_progressive(self, paths, input_basenames):
+        """分批建卡：清空后先空排一次确定列数，随后每 _CHUNK 张卡让出一次事件循环。"""
+        for c in self._cards:
+            c.deleteLater()
+        self._cards.clear()
+        self._relayout()
+        self._pending = [(p, input_basenames) for p in paths]
+        self._fill_next_chunk()
+
+    def _fill_next_chunk(self):
+        if not self._pending:
+            return
+        batch, self._pending = self._pending[:_CHUNK], self._pending[_CHUNK:]
+        start = len(self._cards)
+        for path, names in batch:
+            self._cards.append(self._make_card(path, names))
+        # 只把本批新增卡片补进网格末尾（列数未变时与全量重排等价，避免 O(n²) 重排）
+        cols = getattr(self, "_grid_cols", 1) or 1
+        for i, card in enumerate(self._cards[start:]):
+            self.gridLayout.addWidget(card, (start + i) // cols, (start + i) % cols)
+        self._update_count()
+        if self._pending:
+            QTimer.singleShot(0, self._fill_next_chunk)
 
     def _on_search(self, text):
         self._filter = text

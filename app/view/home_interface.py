@@ -64,9 +64,9 @@ class HomeInterface(Interface):
         self.qmpcCard = VersionCard(
             "QMPC MMKV", image("fliew.png"), "QQ 音乐密钥自动提取"
         )
-        self.umCard.update_info("检测中...", False)
-        self.ffmpegCard.update_info("检测中...", False)
-        self.qmpcCard.update_info("检测中...", False)
+        self.umCard.set_detecting()
+        self.ffmpegCard.set_detecting()
+        self.qmpcCard.set_detecting()
 
         self.toolsTitle = StrongBodyLabel("工具检测", self)
         self.vLayout.addWidget(self.toolsTitle)

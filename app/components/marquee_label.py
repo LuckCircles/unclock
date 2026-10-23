@@ -21,7 +21,7 @@ class MarqueeLabel(QWidget):
     """单行文本，悬停且溢出时首尾相连无缝循环滚动。"""
 
     _INTERVAL = 16        # 定时器间隔（ms）≈60fps
-    _SPEED = 110          # 滚动速度（像素/秒）
+    _SPEED = 85           # 滚动速度（像素/秒）
     _START_DELAY = 0.15   # 悬停后起始延迟（秒）：兼顾启动速度与误触发过滤
     _RAMP = 0.15          # 起步加速时长（秒）：速度由 50% 平滑升至 100%
     _GAP = 48             # 首尾相连时相邻两份文本的间距（像素）
@@ -29,15 +29,10 @@ class MarqueeLabel(QWidget):
 
     def __init__(self, text: str = "", parent=None):
         super().__init__(parent)
-        # 首尾两份相同文本：第二份在第一份滚出后接替，实现无缝循环
-        self._labels = []
-        for _ in range(2):
-            lb = StrongBodyLabel("", self)
-            lb.setWordWrap(False)
-            lb.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-            # 子控件对鼠标透明：悬停进入/离开事件才能落到本控件
-            lb.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-            self._labels.append(lb)
+        # 首尾两份相同文本：第二份在第一份滚出后接替，实现无缝循环。
+        # 第二份**按需创建**（仅在真正开始滚动时）——不滚动的卡片永远只有一份，
+        # 数百张卡的启动/刷新场景下省掉约一半标签构建开销。
+        self._labels = [self._make_label()]
         self._offset = 0.0     # 当前滚动偏移（一个周期内取模）
         self._age = 0.0        # 本次滚动启动后的时长（秒），用于起步加速
         self._pause = 0.0      # 剩余起始延迟（秒）
@@ -56,6 +51,14 @@ class MarqueeLabel(QWidget):
         self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         if text:
             self.setText(text)
+
+    def _make_label(self, text: str = "") -> StrongBodyLabel:
+        """创建一份文本子控件（对鼠标透明，悬停事件才能落到本控件）。"""
+        lb = StrongBodyLabel(text, self)
+        lb.setWordWrap(False)
+        lb.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        lb.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        return lb
 
     def text(self) -> str:
         return self._labels[0].text()
@@ -84,6 +87,16 @@ class MarqueeLabel(QWidget):
         self._place()
         self._apply_scrolling()
 
+    def _ensure_second(self):
+        """按需创建第二份文本（首尾相连循环用）；已存在则直接返回。"""
+        if len(self._labels) >= 2:
+            return
+        lb = self._make_label(self._labels[0].text())
+        lb.adjustSize()
+        if self.height() > 0:
+            lb.setFixedHeight(self.height())
+        self._labels.append(lb)
+
     def _place(self):
         """按当前偏移摆放首尾两份文本（偏移在周期内取模，回绕无感）。"""
         p = self._period
@@ -94,6 +107,7 @@ class MarqueeLabel(QWidget):
         """仅当「悬停 且 文本溢出」时才滚动，否则静态并复位到开头。"""
         should = self._need_scroll and self._hovered
         if should and not self._timer.isActive():
+            self._ensure_second()
             self._offset = 0
             self._age = 0
             self._pause = self._START_DELAY
@@ -103,18 +117,19 @@ class MarqueeLabel(QWidget):
         elif not should:
             if self._timer.isActive():
                 self._stop()
-            else:
-                # 静止态：隐藏第二份文本，确保只显示一份
+            elif len(self._labels) > 1:
+                # 静止态：隐藏第二份文本（若已创建），确保只显示一份
                 self._labels[1].setVisible(False)
         self.update()
 
     def _stop(self):
-        """停止滚动并复位到开头（隐藏第二份文本）。"""
+        """停止滚动并复位到开头（隐藏第二份文本，若已创建）。"""
         self._timer.stop()
         self._offset = 0
         self._age = 0
         self._pause = 0
-        self._labels[1].setVisible(False)
+        if len(self._labels) > 1:
+            self._labels[1].setVisible(False)
         self._labels[0].move(0, 0)
 
     def _tick(self):
