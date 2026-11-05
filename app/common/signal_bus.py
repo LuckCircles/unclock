@@ -19,11 +19,12 @@ class SignalBus(QObject):
     conversion_finished = Signal(int)        # exit_code
     file_started = Signal(str)              # file_path
     file_finished = Signal(str, bool)       # file_path, success
+    file_cancelled = Signal(str)            # file_path（用户停止任务时未处理完的文件）
     log_emitted = Signal(str, str)          # message, level
     toast_requested = Signal(str, str)      # message, level（请求首页弹 InfoBar 浮层）
 
     # ===== 工具检测（service → home） =====
-    tools_detected = Signal(str, bool, str, bool, str, bool)  # um_ver, um_ready, ff_ver, ff_ready, qmpc_ver, qmpc_ready
+    tools_detected = Signal(object)           # ToolsReport（见 service/tool_detector.py）
 
     # ===== 路径变更 / 队列管理 =====
     paths_changed = Signal()                # 输入/输出目录变更

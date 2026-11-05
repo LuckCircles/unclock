@@ -48,9 +48,9 @@ class HomeInterface(Interface):
         self.flipView.setFixedHeight(220)
         self.flipView.setBorderRadius(16)
         self.flipView.setAspectRatioMode(Qt.KeepAspectRatioByExpanding)
-        welcome_path = image("welcome.png")
-        if QFile.exists(welcome_path):
-            self.flipView.addImage(welcome_path)
+        banner_path = image("interface.png")
+        if QFile.exists(banner_path):
+            self.flipView.addImage(banner_path)
             self.flipView.setCurrentIndex(0)
         self.vLayout.addWidget(self.flipView)
 
@@ -133,7 +133,8 @@ class HomeInterface(Interface):
         signalBus.tools_detected.connect(self._on_tools_detected)
         signalBus.toast_requested.connect(self._show_toast)
         signalBus.conversion_started.connect(self._on_conversion_started)
-        signalBus.file_finished.connect(self._on_file_progress)
+        signalBus.file_finished.connect(self._advance_progress)
+        signalBus.file_cancelled.connect(self._advance_progress)
         signalBus.conversion_finished.connect(lambda *_: self._set_button_state("idle"))
         signalBus.paths_changed.connect(self.refresh_paths)
 
@@ -146,10 +147,11 @@ class HomeInterface(Interface):
             signalBus.request_stop.emit()
             self._set_button_state("stopping")
 
-    def _on_tools_detected(self, um_ver, um_ready, ff_ver, ff_ready, qmpc_ver, qmpc_ready):
-        self.umCard.update_info(um_ver, um_ready)
-        self.ffmpegCard.update_info(ff_ver, ff_ready)
-        self.qmpcCard.update_info(qmpc_ver, qmpc_ready)
+    def _on_tools_detected(self, report):
+        """工具检测完成：按报告更新三张检测卡片（载荷为 ToolsReport dataclass）。"""
+        self.umCard.update_info(report.um.version, report.um.ready)
+        self.ffmpegCard.update_info(report.ffmpeg.version, report.ffmpeg.ready)
+        self.qmpcCard.update_info(report.qmpc.version, report.qmpc.ready)
 
     def _open_input_dir(self):
         self._open_directory(cfg.input_dir.value, "输入目录")
@@ -194,8 +196,8 @@ class HomeInterface(Interface):
         self._update_progress_text()
         self._set_button_state("running")
 
-    def _on_file_progress(self, _path: str, _success: bool):
-        """单个文件处理完成：推进进度条。"""
+    def _advance_progress(self, *_args):
+        """单个文件处理完成或被取消：推进进度条（兼容两种信号的任意参数）。"""
         self._done_files = min(self._done_files + 1, self._total_files)
         self.progressBar.setValue(self._done_files)
         self._update_progress_text()

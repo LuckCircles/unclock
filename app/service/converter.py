@@ -34,6 +34,9 @@ _QMC_SUFFIXES = {
     ".tkm", ".tm0", ".tm2", ".tm3", ".tm6",
 }
 
+# 单文件处理超时（毫秒）：超过即 kill 进程、标记失败并跳过，防止卡死整个队列
+_FILE_TIMEOUT_MS = 120_000
+
 
 def _is_qmc_file(path: str) -> bool:
     lower = path.lower()
@@ -51,6 +54,12 @@ class UnlockMusicConverter(QObject):
         self._handled = False  # 当前文件是否已被收尾（防崩溃/结束双信号重复处理）
         self._ok_count = 0     # 本轮任务成功数（供结束汇总 InfoBar）
         self._fail_count = 0   # 本轮任务失败数
+        self._timed_out = False  # 当前文件是否因超时被 kill（区分失败原因）
+
+        # 单文件处理超时计时器：启动进程时计时，收尾时停止
+        self._timeout_timer = QTimer(self)
+        self._timeout_timer.setSingleShot(True)
+        self._timeout_timer.timeout.connect(self._on_file_timeout)
 
         self._wire_process()
         self._wire_signals()
@@ -106,13 +115,22 @@ class UnlockMusicConverter(QObject):
 
     def stop(self):
         if self.process.state() == QProcess.Running:
+            # 收集被取消的文件（当前处理中 + 排队未开始），逐个广播独立信号：
+            # 任务页把卡片回退为「待解密」，首页进度条照常推进到满
+            cancelled = []
+            if self.current_file:
+                cancelled.append(self.current_file)
+            cancelled.extend(self.pending_files)
             self.pending_files.clear()
             self.current_file = None
             self._handled = True
+            self._timeout_timer.stop()
             self.process.kill()
             signalBus.log_emitted.emit("正在停止任务...", "warning")
             signalBus.toast_requested.emit("已停止解密。", "warning")
             logger.warning("用户请求停止解密任务")
+            for path in cancelled:
+                signalBus.file_cancelled.emit(path)
         # 复位按钮态（用户停止或退出清理时都回到 idle）
         signalBus.conversion_finished.emit(0)
 
@@ -165,6 +183,25 @@ class UnlockMusicConverter(QObject):
             # (FailedToStart) 仅补记日志，不重复收尾
             self._finalize_current_file(False, -1)
             return
+        # 进程已启动：开始单文件超时计时（收尾时停止）
+        self._timed_out = False
+        self._timeout_timer.start(_FILE_TIMEOUT_MS)
+
+    def _on_file_timeout(self):
+        """单文件处理超时：kill 进程，复用既有 finished/Crashed 收尾链路。
+
+        ``_timed_out`` 标记供 ``_finalize_current_file`` 区分「超时终止」与
+        「进程自身失败」，给出不同的失败文案。
+        """
+        if self.process.state() != QProcess.Running or self.current_file is None:
+            return
+        self._timed_out = True
+        name = Path(self.current_file).name
+        signalBus.log_emitted.emit(
+            f"处理超时（{_FILE_TIMEOUT_MS // 1000} 秒），终止 {name} 并跳过。", "warning"
+        )
+        logger.warning(f"文件处理超时被终止: {name}")
+        self.process.kill()
 
     def _build_file_args(self, file_path: str) -> list[str]:
         args = ["-i", file_path]
@@ -245,6 +282,7 @@ class UnlockMusicConverter(QObject):
         if self._handled or self.current_file is None:
             return
         self._handled = True
+        self._timeout_timer.stop()
 
         path = self.current_file
         self.current_file = None
@@ -259,10 +297,11 @@ class UnlockMusicConverter(QObject):
             logger.info(f"文件处理完成: {name} 退出码={exit_code}")
         else:
             self._fail_count += 1
-            signalBus.log_emitted.emit(
-                f"{name} 解密失败（退出码 {exit_code}），已记录并跳过，继续后续文件。",
-                "error",
-            )
+            if self._timed_out:
+                reason = f"{name} 处理超时（{_FILE_TIMEOUT_MS // 1000} 秒），已终止并跳过，继续后续文件。"
+            else:
+                reason = f"{name} 解密失败（退出码 {exit_code}），已记录并跳过，继续后续文件。"
+            signalBus.log_emitted.emit(reason, "error")
             # 单文件失败：浮层提示（跳过并继续，不中断整批）
             signalBus.toast_requested.emit(
                 f"{name} 解密失败，已跳过并继续。", "error"

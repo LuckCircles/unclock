@@ -29,7 +29,14 @@ _STATUS_META = {
 class TaskCard(CardWidget):
     """单个待转换/已转换文件卡片。"""
 
-    def __init__(self, file_path: str, parent=None):
+    def __init__(self, file_path: str, parent=None, meta=None, badge=None):
+        """构建单张文件卡片。
+
+        ``meta`` 为 ``(size, mtime)`` 预取元数据：由扫描线程批量取齐后
+        传入，建卡不再逐卡访问磁盘；缺省时回退为本地 ``os.stat``。
+        ``badge`` 为 ``(文本, kind)`` 初始徽章：跳过默认"待解密"徽章的
+        创建-销毁-重建，长列表批量建卡时省一半徽章控件。
+        """
         super().__init__(parent)
         self.file_path = file_path
         self._status = "pending"
@@ -38,7 +45,8 @@ class TaskCard(CardWidget):
         # 固定高度、宽度自适应拉伸（网格均分填满整行）：
         # 高度固定保证网格行高与实际渲染一致，不重叠
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.setMinimumWidth(300)
+        # 最小宽 240：与网格 6 列布局（卡宽可至约 260）兼容，避免顶破网格
+        self.setMinimumWidth(240)
         self.setFixedHeight(64)
 
         self.hLayout = QHBoxLayout(self)
@@ -56,7 +64,7 @@ class TaskCard(CardWidget):
         self.nameLabel.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
         # 单行省略号，避免文本换行撑高卡片导致网格行高不一致
-        self.metaLabel = CaptionLabel(self._meta_text(file_path), self)
+        self.metaLabel = CaptionLabel(self._meta_text(file_path, meta), self)
         self.metaLabel.setWordWrap(False)
         self.metaLabel.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Minimum)
         self.metaLabel.setMinimumWidth(0)
@@ -69,13 +77,20 @@ class TaskCard(CardWidget):
         self.hLayout.addLayout(self.textLayout, 1)
 
         self._badge = None
-        self.set_status("pending")
+        if badge is not None:
+            self.set_badge(*badge)
+        else:
+            self.set_status("pending")
 
-    def _meta_text(self, file_path: str) -> str:
+    def _meta_text(self, file_path: str, meta=None) -> str:
         try:
-            stats = os.stat(file_path)
-            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(stats.st_mtime))
-            return f"{format_size(stats.st_size)} · {when}"
+            if meta is not None:
+                size, mtime = meta
+            else:
+                stats = os.stat(file_path)
+                size, mtime = stats.st_size, stats.st_mtime
+            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime))
+            return f"{format_size(size)} · {when}"
         except OSError:
             return ""
 

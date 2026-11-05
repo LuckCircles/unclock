@@ -9,7 +9,9 @@ import sys
 with contextlib.redirect_stdout(io.StringIO()):
     import qfluentwidgets.common.config  # noqa: F401
 
-from PySide6.QtWidgets import QMessageBox
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QWidget
+from qfluentwidgets import MessageBox
 
 from app.common.config import PROJECT_ROOT
 from app.common.logger import logger
@@ -26,7 +28,19 @@ def main():
     # 单实例：已有实例在运行则提示并退出（不重复启动）
     if app.already_running:
         logger.warning("检测到已有实例在运行，退出本次启动")
-        QMessageBox.information(None, "音乐解锁工具", "程序已经在运行中。")
+        # Fluent MessageBox 依赖父窗口尺寸铺满遮罩，此时主窗口尚未创建：
+        # 用与主屏可用区域等大的透明无边框宿主充当父对象，点击确定后随进程退出
+        host = QWidget()
+        host.setWindowTitle("音乐解锁工具")
+        host.setWindowFlag(Qt.FramelessWindowHint)
+        host.setAttribute(Qt.WA_TranslucentBackground)
+        host.setGeometry(QApplication.primaryScreen().availableGeometry())
+        host.show()
+        box = MessageBox("音乐解锁工具", "程序已经在运行中。", host)
+        box.yesButton.setText("确定")
+        box.cancelButton.hide()
+        box.exec()
+        host.close()
         return
     window = MainWindow()
     window.show()

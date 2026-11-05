@@ -3,6 +3,7 @@
 
 import re
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool
@@ -10,6 +11,23 @@ from PySide6.QtCore import QObject, QRunnable, QThreadPool
 from ..common.config import cfg
 from ..common.logger import logger
 from ..common.signal_bus import signalBus
+
+
+@dataclass(frozen=True)
+class ToolInfo:
+    """单个外部工具的检测结果。"""
+
+    version: str
+    ready: bool
+
+
+@dataclass(frozen=True)
+class ToolsReport:
+    """一次工具链检测的汇总报告（``tools_detected`` 信号载荷）。"""
+
+    um: ToolInfo
+    ffmpeg: ToolInfo
+    qmpc: ToolInfo
 
 
 class _DetectTask(QRunnable):
@@ -40,35 +58,35 @@ class ToolDetector(QObject):
 
     def detect(self):
         logger.info("开始工具链自动检测")
-        um_ver, um_ready = self._check_um()
-        ff_ver, ff_ready = self._check_ffmpeg()
-        qmpc_ver, qmpc_ready = self._check_qmpc()
+        report = ToolsReport(
+            um=self._check_um(),
+            ffmpeg=self._check_ffmpeg(),
+            qmpc=self._check_qmpc(),
+        )
         logger.info(
-            f"工具链检测完成: um={um_ver}({'就绪' if um_ready else '缺失'}) "
-            f"ffmpeg={ff_ver}({'就绪' if ff_ready else '缺失'}) "
-            f"qmpc={qmpc_ver}({'就绪' if qmpc_ready else '缺失'})"
+            f"工具链检测完成: um={report.um.version}({'就绪' if report.um.ready else '缺失'}) "
+            f"ffmpeg={report.ffmpeg.version}({'就绪' if report.ffmpeg.ready else '缺失'}) "
+            f"qmpc={report.qmpc.version}({'就绪' if report.qmpc.ready else '缺失'})"
         )
         # 工具监测情况同步到运行日志页（每个 exe 一行）
-        for name, ver, ready in (
-            ("um.exe", um_ver, um_ready),
-            ("ffmpeg.exe", ff_ver, ff_ready),
-            ("qmpc-mmkv-cli.exe", qmpc_ver, qmpc_ready),
+        for name, info in (
+            ("um.exe", report.um),
+            ("ffmpeg.exe", report.ffmpeg),
+            ("qmpc-mmkv-cli.exe", report.qmpc),
         ):
             signalBus.log_emitted.emit(
-                f"工具监测 {name}: {ver} ({'就绪' if ready else '缺失'})", "info"
+                f"工具监测 {name}: {info.version} ({'就绪' if info.ready else '缺失'})", "info"
             )
-        signalBus.tools_detected.emit(
-            um_ver, um_ready, ff_ver, ff_ready, qmpc_ver, qmpc_ready
-        )
+        signalBus.tools_detected.emit(report)
 
     def detect_async(self):
         """后台线程池执行检测：不占用启动关键路径，结果经信号总线异步更新界面。"""
         QThreadPool.globalInstance().start(_DetectTask(self))
 
-    def _check_um(self):
+    def _check_um(self) -> ToolInfo:
         path = Path(cfg.um_path.value)
         if not path.exists():
-            return "未找到", False
+            return ToolInfo("未找到", False)
         try:
             res = subprocess.run(
                 [str(path), "--version"],
@@ -77,15 +95,15 @@ class ToolDetector(QObject):
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
             match = re.search(r"v\d+\.\d+\.\d+", res.stdout)
-            return (match.group(0) if match else "版本未知"), True
+            return ToolInfo(match.group(0) if match else "版本未知", True)
         except Exception as exc:  # noqa: BLE001
             logger.debug(f"获取 um 版本失败: {exc}")
-            return "版本未知", True
+            return ToolInfo("版本未知", True)
 
-    def _check_ffmpeg(self):
+    def _check_ffmpeg(self) -> ToolInfo:
         path = Path(cfg.ffmpeg_path.value)
         if not path.exists():
-            return "未找到", False
+            return ToolInfo("未找到", False)
         try:
             res = subprocess.run(
                 [str(path), "-version"],
@@ -95,15 +113,15 @@ class ToolDetector(QObject):
             )
             line = res.stdout.splitlines()[0] if res.stdout else ""
             match = re.search(r"version\s+(\d+(?:\.\d+)*)", line, re.I)
-            return (match.group(1) if match else "版本未知"), True
+            return ToolInfo(match.group(1) if match else "版本未知", True)
         except Exception as exc:  # noqa: BLE001
             logger.debug(f"获取 ffmpeg 版本失败: {exc}")
-            return "版本未知", True
+            return ToolInfo("版本未知", True)
 
-    def _check_qmpc(self):
+    def _check_qmpc(self) -> ToolInfo:
         path = Path(cfg.qmpc_path.value)
         if not path.exists():
-            return "未找到", False
+            return ToolInfo("未找到", False)
         try:
             res = subprocess.run(
                 [str(path), "-h"],
@@ -113,7 +131,7 @@ class ToolDetector(QObject):
             )
             output = res.stderr or res.stdout
             match = re.search(r"v\d+\.\d+\.\d+", output)
-            return (match.group(0) if match else "版本未知"), True
+            return ToolInfo(match.group(0) if match else "版本未知", True)
         except Exception as exc:  # noqa: BLE001
             logger.debug(f"获取 qmpc-mmkv-cli 版本失败: {exc}")
-            return "版本未知", True
+            return ToolInfo("版本未知", True)
