@@ -10,9 +10,9 @@ service 解耦。
 import os
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QProcess, QTimer
+from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer
 
-from ..common.config import cfg
+from ..common.config import CONVERSION_OPTIONS, cfg
 from ..common.logger import logger
 from ..common.signal_bus import signalBus
 from ..common.utils import (
@@ -55,6 +55,8 @@ class UnlockMusicConverter(QObject):
         self._ok_count = 0     # 本轮任务成功数（供结束汇总 InfoBar）
         self._fail_count = 0   # 本轮任务失败数
         self._timed_out = False  # 当前文件是否因超时被 kill（区分失败原因）
+        self._stopped = False    # 本轮是否被用户停止（阻止延迟排队继续启动下一文件）
+        self._saw_failure = False  # 当前文件输出中是否出现失败标志（退出码之外的兜底）
 
         # 单文件处理超时计时器：启动进程时计时，收尾时停止
         self._timeout_timer = QTimer(self)
@@ -63,6 +65,9 @@ class UnlockMusicConverter(QObject):
 
         self._wire_process()
         self._wire_signals()
+        # 软件启动时注入一次 ffmpeg PATH（配置变更时在 _wire_signals 里同步刷新），
+        # 对 um 子进程全程生效，无需每个文件启动前重复设置
+        self._apply_ffmpeg_env()
 
     # ------------------------------------------------------------------ 信号
     def _wire_process(self):
@@ -77,6 +82,11 @@ class UnlockMusicConverter(QObject):
         signalBus.request_stop.connect(self.stop)
         # 任务页移除/删除排队中的文件时，同步从待处理队列剔除（解密不管理已移出列表的文件）
         signalBus.queue_remove.connect(self._remove_from_queue)
+        # 配置页修改 ffmpeg 路径后立即重新注入，无需重启软件
+        cfg.ffmpeg_path.valueChanged.connect(self._on_ffmpeg_path_changed)
+
+    def _on_ffmpeg_path_changed(self, *_args):
+        self._apply_ffmpeg_env()
 
     # ------------------------------------------------------------- 公共 API
     def start(self, files=None):
@@ -106,6 +116,8 @@ class UnlockMusicConverter(QObject):
 
         self._ok_count = 0
         self._fail_count = 0
+        self._stopped = False
+        self._warn_unsupported_negative_options()
         signalBus.conversion_started.emit(len(self.pending_files))
         logger.info(f"开始解密任务: {len(self.pending_files)} 个文件")
         signalBus.log_emitted.emit(
@@ -113,19 +125,38 @@ class UnlockMusicConverter(QObject):
         )
         self._start_next_file()
 
+    def _warn_unsupported_negative_options(self):
+        """「否」+ um 默认开启的选项：um 未提供关闭参数，明确提示而非静默等价「默认」。
+
+        um v0.2.20 六个参数中仅 ``-n``（跳过无动作解码器）默认开启，且无
+        ``--no-*`` 形式；其余五个默认关闭，「否」与「默认」同为不传参。
+        """
+        for item, label, _arg, um_default_on in CONVERSION_OPTIONS:
+            if item.value == "否" and um_default_on:
+                signalBus.log_emitted.emit(
+                    f"「{label}」um 默认开启且无关闭参数，选项“否”已按默认执行。",
+                    "warning",
+                )
+
     def stop(self):
-        if self.process.state() == QProcess.Running:
-            # 收集被取消的文件（当前处理中 + 排队未开始），逐个广播独立信号：
-            # 任务页把卡片回退为「待解密」，首页进度条照常推进到满
-            cancelled = []
-            if self.current_file:
-                cancelled.append(self.current_file)
-            cancelled.extend(self.pending_files)
-            self.pending_files.clear()
-            self.current_file = None
-            self._handled = True
-            self._timeout_timer.stop()
+        """停止本轮任务：无论 QProcess 处于 Running / Starting / NotRunning，
+        都清空队列并阻止已排队的延迟启动继续处理，避免「按钮已复位、后台还在跑」。
+        """
+        cancelled = []
+        if self.current_file:
+            cancelled.append(self.current_file)
+        cancelled.extend(self.pending_files)
+        had_task = bool(cancelled) or self.process.state() != QProcess.NotRunning
+
+        self._stopped = True
+        self.pending_files.clear()
+        self.current_file = None
+        self._handled = True
+        self._timeout_timer.stop()
+        if self.process.state() != QProcess.NotRunning:
             self.process.kill()
+
+        if had_task:
             signalBus.log_emitted.emit("正在停止任务...", "warning")
             signalBus.toast_requested.emit("已停止解密。", "warning")
             logger.warning("用户请求停止解密任务")
@@ -145,6 +176,8 @@ class UnlockMusicConverter(QObject):
 
     # ----------------------------------------------------------------- 内部
     def _start_next_file(self):
+        if self._stopped:
+            return  # 用户停止后，已排队的 QTimer.singleShot 不得再启动任何文件
         if not self.pending_files:
             self.current_file = None
             self._handled = True
@@ -154,6 +187,7 @@ class UnlockMusicConverter(QObject):
 
         self.current_file = self.pending_files.pop(0)
         self._handled = False
+        self._saw_failure = False
         # 排队期间被删除/移走的文件（含用户在任务页移除、或外部删除）：跳过，
         # 不计失败；仍发 file_finished 推进进度条，然后继续后续文件。
         if not os.path.exists(self.current_file):
@@ -213,19 +247,29 @@ class UnlockMusicConverter(QObject):
         if _is_qmc_file(file_path) and cfg.qmpc_path.value and os.path.exists(cfg.qmpc_path.value):
             args.extend(["--qmpc-mmkv-cli-exe", cfg.qmpc_path.value])
 
-        if _TRISTATE.get(cfg.remove_source.value) is True:
-            args.append("--rs")
-        if _TRISTATE.get(cfg.verbose.value) is True:
-            args.append("-V")
-        if _TRISTATE.get(cfg.overwrite.value) is True:
-            args.append("--overwrite")
-        if _TRISTATE.get(cfg.watch.value) is True:
-            args.append("--watch")
-        if _TRISTATE.get(cfg.update_metadata.value) is True:
-            args.append("--update-metadata")
-        if _TRISTATE.get(cfg.skip_noop.value) is True:
-            args.append("-n")
+        for item, _label, arg, _um_default_on in CONVERSION_OPTIONS:
+            # 「是」才追加参数；「否」/「默认」均不传（um 未提供关闭参数，
+            # 无法表达显式关闭，_warn_unsupported_negative_options 已提示用户）
+            if _TRISTATE.get(item.value) is True:
+                args.append(arg)
         return args
+
+    def _apply_ffmpeg_env(self):
+        """把 ffmpeg 所在目录前置注入 um 子进程 PATH（仅本软件派生的子进程生效）。
+
+        软件启动时与配置变更时各调用一次：QProcessEnvironment 设置后对
+        该进程对象后续所有 start 持续生效。um 查找 ffmpeg/ffprobe 只认
+        自己进程的 PATH（不接受路径参数，也不搜索自身目录）；不注入则
+        系统未装 ffmpeg 的用户即使配置了路径、打包产物内嵌了 ffmpeg.exe，
+        开启「更新封面」也会失败。
+        """
+        env = QProcessEnvironment.systemEnvironment()
+        ffmpeg_path = cfg.ffmpeg_path.value
+        if ffmpeg_path and os.path.isfile(ffmpeg_path):
+            ffmpeg_dir = str(Path(ffmpeg_path).parent)
+            current = env.value("PATH", "")
+            env.insert("PATH", f"{ffmpeg_dir}{os.pathsep}{current}" if current else ffmpeg_dir)
+        self.process.setProcessEnvironment(env)
 
     def _log_process_output(self, raw: bytes, default_level: str):
         """um 进程输出处理：所有原始行写 app.log，UI 只显示 success/error 关键结果。"""
@@ -235,6 +279,10 @@ class UnlockMusicConverter(QObject):
                 continue
             # 原始输出全部写入 app.log（详细排查用）
             logger.debug(f"um 输出: {line}")
+            lower = line.lower()
+            # 退出码之外的兜底：um 明确报失败时即使返回 0 也不算成功
+            if "conversion failed" in lower or "run app failed" in lower:
+                self._saw_failure = True
             simplified, level = simplify_process_line(line)
             # UI 日志页只显示用户关心的处理结果（成功/失败）
             if simplified and level in ("success", "error"):
@@ -257,7 +305,9 @@ class UnlockMusicConverter(QObject):
         无论成功失败都记录并继续后续文件；本方法只负责收尾，
         实际「继续/结束」由 ``_finalize_current_file`` 内统一推进。
         """
-        self._finalize_current_file(exit_code == 0, exit_code)
+        self._finalize_current_file(
+            exit_code == 0 and not self._saw_failure, exit_code
+        )
 
     def _on_process_error(self, error):
         """进程错误：单文件崩溃时跳过并记录、继续后续转换，不中断整批。"""
@@ -312,6 +362,8 @@ class UnlockMusicConverter(QObject):
 
     def _continue_internal(self):
         """推进下一个待处理文件；队列空则结束整批任务。"""
+        if self._stopped:
+            return  # 已停止：不得再广播「全部完成」或推进队列
         if self.pending_files:
             # 延迟到下一轮事件循环再启动：确保崩溃/结束的残存信号先被消化，
             # 避免误把下一个文件当成失败收尾

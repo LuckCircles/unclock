@@ -10,6 +10,8 @@ from qfluentwidgets import (
     StrongBodyLabel,
     TransparentToolButton,
     FluentIcon,
+    ToolTipFilter,
+    ToolTipPosition,
     isDarkTheme,
 )
 
@@ -58,7 +60,12 @@ class LogInterface(Interface):
         self.headerLayout.setSpacing(10)
         self.titleLabel = StrongBodyLabel("运行日志", self.logCard)
         self.btnClear = TransparentToolButton(FluentIcon.DELETE, self.logCard)
-        self.btnClear.setToolTip("清空日志")
+        self.btnClear.setToolTip("<b>清空日志</b><br/>只清空本页显示，不影响日志文件")
+        self.btnClear.setToolTipDuration(-1)  # 鼠标移开才隐藏
+        self.btnClearTip = ToolTipFilter(
+            self.btnClear, showDelay=300, position=ToolTipPosition.TOP
+        )
+        self.btnClear.installEventFilter(self.btnClearTip)
         self.headerLayout.addWidget(self.titleLabel)
         self.headerLayout.addStretch(1)
         self.headerLayout.addWidget(self.btnClear)

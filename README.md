@@ -1,6 +1,6 @@
 # unclock
 
-基于 PySide6 + QFluentWidgets 的 [Unlock Music](https://github.com/unlock-music/cli) (`um`) 图形化前端，提供文件管理、批量转换、实时日志与可视化配置，界面统一采用官方 Fluent 主题色。
+基于 PySide6 + QFluentWidgets 的 [Unlock Music](https://git.um-react.app/um/cli) (`um`) 图形化前端，提供文件管理、批量转换、实时日志与可视化配置，界面统一采用官方 Fluent 主题色。
 
 ## 功能
 
@@ -19,7 +19,7 @@
 | PySide6-Fluent-Widgets | `>=1.11.2` |
 | loguru | `>=0.7.3` |
 | Nuitka | standalone 打包 |
-| 外部可执行 | `um.exe`、`ffmpeg.exe`、`qmpc-mmkv-cli.exe`（放置于 `app/resources/` 目录） |
+| 外部可执行 | `um.exe`、`ffmpeg.exe`、`qmpc-mmkv-cli.exe`（放置于项目根目录 `tools/` 目录） |
 
 ## 快速开始
 
@@ -27,7 +27,7 @@
 # 安装依赖（推荐 uv）
 uv sync
 
-# 将 um.exe / ffmpeg.exe / qmpc-mmkv-cli.exe 放入 app/resources/ 目录
+# 将 um.exe / ffmpeg.exe / qmpc-mmkv-cli.exe 放入项目根目录 tools/ 目录
 # （程序会自动检测并填入默认路径）
 
 # 启动
@@ -51,6 +51,10 @@ uv run python build.py
 unclock/
 ├── main.py                       # 薄入口：屏蔽推广输出 + 创建 Application + MainWindow
 ├── build.py                      # Nuitka standalone 打包脚本
+├── tools/                        # 外部可执行工具（程序启动时自动探测）
+│   ├── um.exe                     #   Unlock Music CLI
+│   ├── ffmpeg.exe                 #   FFmpeg
+│   └── qmpc-mmkv-cli.exe          #   QQ 音乐 MMKV 密钥提取
 ├── app/
 │   ├── resource.qrc               # 图片资源清单（编译为 resource_rc.py）
 │   ├── resource_rc.py             # qrc 编译产物（:/img/ 访问）
@@ -74,11 +78,8 @@ unclock/
 │   ├── service/                   # 业务服务层（封装外部进程，view 不直接碰 QProcess）
 │   │   ├── tool_detector.py        #   检测 um / ffmpeg / qmpc-mmkv-cli 版本（后台线程）
 │   │   └── converter.py            #   UnlockMusicConverter：批量队列 + QProcess + 超时 + 事件广播
-│   ├── resources/                  # 外部可执行 + 图片资源
-│   │   ├── img/                    # Banner 与工具图标
-│   │   ├── um.exe                  # Unlock Music CLI
-│   │   ├── ffmpeg.exe              # FFmpeg
-│   │   └── qmpc-mmkv-cli.exe       # QQ 音乐 MMKV 密钥提取
+│   ├── resources/                  # 图片资源（qrc 引用）
+│   │   └── img/                    # 图标 / Banner
 │   └── view/                      # 界面层
 │       ├── main_window.py          #   MSFluentWindow 主窗口，持有 service 并装配页面
 │       ├── home_interface.py       #   首页（banner + 工具检测 + 路径卡片 + 启动按钮）

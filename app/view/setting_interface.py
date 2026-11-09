@@ -11,7 +11,7 @@ from qfluentwidgets import (
     qconfig,
 )
 
-from ..common.config import cfg
+from ..common.config import CONVERSION_OPTIONS, cfg
 from ..common.signal_bus import signalBus
 from ..components.interface import Interface
 
@@ -50,18 +50,15 @@ class SettingInterface(Interface):
 
         # ===== 转换设置 =====
         self.convGroup = SettingCardGroup("转换设置", self.view)
-        options_meta = [
-            (cfg.remove_source, "删除源文件", "--rs"),
-            (cfg.verbose, "详细输出", "-V"),
-            (cfg.overwrite, "覆盖输出", "--overwrite"),
-            (cfg.watch, "监听输入目录", "--watch"),
-            (cfg.update_metadata, "更新封面", "--update-metadata"),
-            (cfg.skip_noop, "跳过无动作解码器", "-n"),
-        ]
-        for config_item, label, arg in options_meta:
+        # 选项元数据由 common 层提供，service 与 view 共用同一份，避免参数/默认值漂移
+        for config_item, label, arg, um_default_on in CONVERSION_OPTIONS:
+            hint = f"对应参数: {arg} · um 默认: {'开启' if um_default_on else '关闭'}"
+            if um_default_on:
+                # um 未提供关闭参数：明确告知用户「否」无法关闭，避免静默误导
+                hint += "（无关闭参数，选“否”仍按默认执行）"
             card = ComboBoxSettingCard(
                 config_item, FluentIcon.SETTING, label,
-                f"对应参数: {arg}", ["否", "是", "默认"], self.convGroup,
+                hint, ["否", "是", "默认"], self.convGroup,
             )
             self.convGroup.addSettingCard(card)
         self.vLayout.addWidget(self.convGroup)

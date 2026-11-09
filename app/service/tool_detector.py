@@ -13,6 +13,11 @@ from ..common.logger import logger
 from ..common.signal_bus import signalBus
 
 
+# 单个工具版本探测超时（秒）：外部 exe 卡住时后台线程不再被永久占用，
+# 首页三张版本卡也不会永远停在「检测中...」
+_VERSION_TIMEOUT_S = 8
+
+
 @dataclass(frozen=True)
 class ToolInfo:
     """单个外部工具的检测结果。"""
@@ -48,6 +53,16 @@ class _DetectTask(QRunnable):
             # 启动后极短窗口内退出时，解释器拆解可能与信号广播竞态
             # （Signal source has been deleted）——此时结果已无人接收，安全忽略
             logger.debug(f"工具检测任务异常退出（可能为退出竞态）: {exc}")
+        except Exception as exc:  # noqa: BLE001
+            # 兜底：任何未预期异常都不能让首页三张卡永远停在「检测中...」
+            logger.warning(f"工具检测任务异常: {exc}")
+            try:
+                unknown = ToolInfo("检测异常", False)
+                signalBus.tools_detected.emit(
+                    ToolsReport(unknown, unknown, unknown)
+                )
+            except RuntimeError:
+                logger.debug("工具检测兜底广播时对象已销毁，忽略")
 
 
 class ToolDetector(QObject):
@@ -93,6 +108,7 @@ class ToolDetector(QObject):
                 capture_output=True,
                 text=True,
                 creationflags=subprocess.CREATE_NO_WINDOW,
+                timeout=_VERSION_TIMEOUT_S,
             )
             match = re.search(r"v\d+\.\d+\.\d+", res.stdout)
             return ToolInfo(match.group(0) if match else "版本未知", True)
@@ -110,6 +126,7 @@ class ToolDetector(QObject):
                 capture_output=True,
                 text=True,
                 creationflags=subprocess.CREATE_NO_WINDOW,
+                timeout=_VERSION_TIMEOUT_S,
             )
             line = res.stdout.splitlines()[0] if res.stdout else ""
             match = re.search(r"version\s+(\d+(?:\.\d+)*)", line, re.I)
@@ -128,6 +145,7 @@ class ToolDetector(QObject):
                 capture_output=True,
                 text=True,
                 creationflags=subprocess.CREATE_NO_WINDOW,
+                timeout=_VERSION_TIMEOUT_S,
             )
             output = res.stderr or res.stdout
             match = re.search(r"v\d+\.\d+\.\d+", output)

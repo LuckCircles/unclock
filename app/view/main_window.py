@@ -10,7 +10,7 @@ from qfluentwidgets import FluentIcon, MSFluentWindow, NavigationItemPosition
 from ..common.config import cfg
 from ..common.decrypt_scanner import classify_files
 from ..common.logger import logger
-from ..common.resource import binary
+from ..common.resource import image
 from ..common.signal_bus import signalBus
 from ..service.converter import UnlockMusicConverter
 from ..service.tool_detector import ToolDetector
@@ -63,7 +63,7 @@ class MainWindow(MSFluentWindow):
     def init_window(self):
         self.resize(1080, 760)
         self.setWindowTitle("音乐解锁工具 - Fluent UI")
-        self.setWindowIcon(QIcon(binary("img/pwa.ico")))
+        self.setWindowIcon(QIcon(image("um.ico")))
         desktop = QApplication.primaryScreen().availableGeometry()
         w, h = desktop.width(), desktop.height()
         self.move(w // 2 - self.width() // 2, h // 2 - self.height() // 2)
@@ -76,12 +76,16 @@ class MainWindow(MSFluentWindow):
         files = self.taskInterface.get_file_paths()
         if not files:
             input_dir = cfg.input_dir.value
-            if input_dir and os.path.exists(input_dir):
+            if input_dir and os.path.isdir(input_dir):
                 signalBus.log_emitted.emit(
                     f"列表为空，正在扫描输入目录: {input_dir}", "info"
                 )
-                self.taskInterface.scan_directory(input_dir)
-                files = self.taskInterface.get_file_paths()
+                # 任务页渐进建卡（不阻塞 UI）；本轮待处理路径取页面实际
+                # 纳入的扫描结果（已应用用户移出 / 手工添加规则），
+                # 不再依赖卡片是否已同步建完
+                files = self.taskInterface.scan_directory(
+                    input_dir, progressive=True
+                )
 
         # 输入/输出目录对比：扫描输出目录建「已解密基名集合」，遍历文件分类汇总
         decrypted, pending, skipped = classify_files(files, cfg.output_dir.value)

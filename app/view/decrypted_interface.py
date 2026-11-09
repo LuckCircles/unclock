@@ -8,6 +8,7 @@
 """
 
 import os
+import queue
 
 from PySide6.QtCore import Qt, QRunnable, QThreadPool, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
@@ -34,16 +35,18 @@ from ..components.task_card import TaskCard
 def _scan_output(out_dir: str, input_dir: str):
     """扫描输出目录音乐文件（含 stat 元数据）与输入基名集合（纯函数，可在后台线程执行）。
 
-    返回 ``(items, input_basenames, empty_msg)``：items 为
+    返回 ``(items, input_basenames, empty_msg, scan_error)``：items 为
     ``(path, size, mtime)`` 元组列表，按修改时间倒序——stat 结果随扫描
     一次取齐，建卡时不再逐卡访问磁盘（scandir 单系统调用取 is_file + stat）。
+    ``scan_error`` 为 True 表示目录读取失败（权限 / 掉线），调用方应保留
+    旧列表，而不是把已有卡片清空后误报「暂无音乐文件」。
     """
     input_basenames = build_input_basenames(input_dir)
     items = []
     if not out_dir:
-        return items, input_basenames, "尚未设置输出目录，请到配置界面设置"
+        return items, input_basenames, "尚未设置输出目录，请到配置界面设置", False
     if not os.path.isdir(out_dir):
-        return items, input_basenames, "输出目录不存在"
+        return items, input_basenames, "输出目录不存在", False
     try:
         with os.scandir(out_dir) as it:
             for entry in it:
@@ -54,24 +57,52 @@ def _scan_output(out_dir: str, input_dir: str):
                 except OSError:
                     continue
     except OSError:
-        items = []
+        return ([], input_basenames,
+                "无法读取输出目录，请检查路径或权限（列表保持上次结果）", True)
     items.sort(key=lambda t: t[2], reverse=True)
-    return items, input_basenames, "输出目录暂无音乐文件"
+    return items, input_basenames, "输出目录暂无音乐文件", False
 
 
 class _ScanRunnable(QRunnable):
-    """后台扫描任务：完成后经 ``done`` 信号回主线程（携带代次号防过期）。"""
+    """后台扫描任务：结果写入线程安全队列，再发无参通知让主线程取件。
 
-    def __init__(self, out_dir: str, input_dir: str, gen: int, done: Signal):
+    原实现由 QRunnable 直接持有 ``Signal(object)`` 并跨线程 emit 一个
+    payload 元组，打包运行时该 SignalInstance 会退化为「0 参签名」并抛
+    ``TypeError: only accepts 0 argument(s), 1 given!``，页面永久停在旧列表。
+    改为数据走 ``queue.SimpleQueue``（纯 Python、线程安全），信号只表达
+    「有结果到达」——不再依赖 Qt 对 Python 对象参数的跨线程封送。
+    """
+
+    def __init__(self, out_dir: str, input_dir: str, gen: int,
+                 results: "queue.SimpleQueue", notify):
         super().__init__()
         self._out_dir = out_dir
         self._input_dir = input_dir
         self._gen = gen
-        self._done = done
+        self._results = results
+        self._notify = notify
 
     def run(self):
-        items, input_basenames, empty_msg = _scan_output(self._out_dir, self._input_dir)
-        self._done.emit((self._gen, items, input_basenames, empty_msg))
+        try:
+            items, input_basenames, empty_msg, scan_error = _scan_output(
+                self._out_dir, self._input_dir
+            )
+        except Exception as exc:  # noqa: BLE001
+            # 扫描本身异常也要回包，否则页面会永久停在旧状态 / 「检测中」
+            logger.warning(f"输出目录扫描失败: {exc}")
+            items, input_basenames, empty_msg, scan_error = (
+                [], set(), "扫描输出目录时出错", True
+            )
+        # 先入队再通知：主线程收到通知时结果一定已可见
+        self._results.put(
+            (self._gen, items, input_basenames, empty_msg, scan_error)
+        )
+        try:
+            self._notify.emit()
+        except Exception as exc:  # noqa: BLE001
+            # 退出竞态（Signal source deleted）或运行时信号异常都不得让
+            # QRunnable::run() 抛出，否则 PySide 会打印整段 override traceback
+            logger.debug(f"输出目录扫描通知失败: 代次 {self._gen}, {exc}")
 
 
 class DecryptedInterface(GridCardContainer):
@@ -84,8 +115,9 @@ class DecryptedInterface(GridCardContainer):
     # 懒加载开关：仅创建视口内可见卡片
     lazy_fill = True
 
-    # 后台扫描完成（后台线程 emit，自动队列连接回主线程）
-    scanDone = Signal(object)
+    # 后台扫描完成通知（后台线程 emit，自动队列连接回主线程）。
+    # 无参：payload 从 _scan_results 队列取，避免跨线程封送 Python 对象
+    scanDone = Signal()
 
     def __init__(self, parent=None):
         super().__init__("DecryptedInterface", parent)
@@ -93,7 +125,9 @@ class DecryptedInterface(GridCardContainer):
         self._empty_msg = "输出目录暂无已解密文件"
         self._input_basenames = set()  # 输入目录加密文件基名集合（建卡时判定来源）
         self._scan_gen = 0             # 扫描代次号：丢弃过期结果（连点刷新时旧扫描作废）
+        self._scan_results = queue.SimpleQueue()  # 后台扫描结果（线程安全）
         self._sources = {}             # 条目 → 来源标签缓存（纯字符串计算，懒求解）
+        self._refresh_mode = False     # 本次扫描是否由「刷新」触发（决定呈现契约）
 
         # 工具栏：计数 + 搜索 + 分类下拉 + 刷新 / 打开目录
         self.countLabel = CaptionLabel("0 个音乐文件", self)
@@ -135,6 +169,7 @@ class DecryptedInterface(GridCardContainer):
         super().showEvent(e)
         if not self._filled_once:
             self._filled_once = True
+            self._refresh_mode = False
             QTimer.singleShot(0, self._start_scan)
 
     # ------------------------------------------------------------ 基类钩子
@@ -192,20 +227,29 @@ class DecryptedInterface(GridCardContainer):
         if add:
             parts.append(f"已添加 {add}")
         summary = " · ".join(parts) if parts else "0"
-        if self._filter.strip() and total != n_visible:
-            self.countLabel.setText(f"{summary} · 匹配 {n_visible}/{total}")
-        else:
-            self.countLabel.setText(f"{summary} · 共 {total}")
+        count_text = (
+            f"{summary} · 匹配 {n_visible}/{total}"
+            if self._filter.strip() and total != n_visible
+            else f"{summary} · 共 {total}"
+        )
+        # 文本未变就不 setText：QLabel.setText 会 updateGeometry 并投递
+        # LayoutRequest，刷新（数据未变）时无需惊动整页布局
+        if self.countLabel.text() != count_text:
+            self.countLabel.setText(count_text)
         if not visible:
-            if self._filter.strip() and total > 0:
-                self.emptyHint.label.setText(f"未找到与“{self._filter.strip()}”匹配的文件")
-            else:
-                self.emptyHint.label.setText(self._empty_msg)
+            hint = (
+                f"未找到与“{self._filter.strip()}”匹配的文件"
+                if self._filter.strip() and total > 0
+                else self._empty_msg
+            )
+            if self.emptyHint.label.text() != hint:
+                self.emptyHint.label.setText(hint)
         self._set_empty_visible(not visible)
 
     # ------------------------------------------------------------ 文件操作
     def refresh(self):
-        """后台扫描输出目录，完成后渐进重建卡片（主线程零阻塞）。"""
+        """后台扫描输出目录，完成后按「回顶部 + 自上而下」呈现（主线程零阻塞）。"""
+        self._refresh_mode = True
         self._start_scan()
 
     def _start_scan(self):
@@ -215,20 +259,80 @@ class DecryptedInterface(GridCardContainer):
         QThreadPool.globalInstance().start(
             _ScanRunnable(
                 cfg.output_dir.value, cfg.input_dir.value,
-                self._scan_gen, self.scanDone,
+                self._scan_gen, self._scan_results, self.scanDone,
             )
         )
 
-    def _on_scan_done(self, payload):
-        """后台扫描完成：应用结果，懒加载铺格重建（真实卡片视口内按需创建）。"""
-        gen, items, input_basenames, empty_msg = payload
-        if gen != self._scan_gen:
-            return  # 过期结果（期间又发起了更新一次的扫描）
-        self._filled_once = True
+    def _on_scan_done(self):
+        """扫描完成通知：取空队列，只应用当前代次的结果。"""
+        payload = None
+        while True:
+            try:
+                candidate = self._scan_results.get_nowait()
+            except queue.Empty:
+                break
+            # 队列顺序是「线程完成顺序」，不保证代次递增：连点刷新时
+            # 较新代次可能先完成。不能简单取队列最后一个，否则它的
+            # payload 会被随后到达的较旧代次覆盖、整批被 gen 校验丢弃，
+            # 页面永久停在旧列表。这里只认当前代次，其余全部作废。
+            if candidate[0] == self._scan_gen:
+                payload = candidate
+        if payload is None:
+            # 当前代次还在扫描中，稍后它自己的通知会再进本槽
+            return
+        (_gen, items, input_basenames, empty_msg, scan_error) = payload
+        # 页面从未显示过时，隐藏视口只有 98×28：按它算列数只会建 1 列 /
+        # 3 张卡，还会把首次切入的入场动画提前吃掉。丢弃这次结果，
+        # 等 showEvent 用真实视口重新扫描（代次号继续串联，不残留在途）。
+        if not self.isVisible() and not self._filled_once:
+            return
+        refresh = self._refresh_mode
+        if scan_error:
+            # 目录读取失败：保留旧列表，不把已有卡片清空成「暂无文件」，
+            # 也不覆盖输入基名集合。列表为空时至少把错误文案显示出来。
+            self._empty_msg = empty_msg
+            logger.warning("输出目录扫描失败：保留上次列表")
+            if not self._items:
+                self._update_count()
+            if refresh:
+                self.replay_from_top()
+            signalBus.toast_requested.emit(
+                "刷新失败：无法读取输出目录，列表保持上次结果。", "warning"
+            )
+            return
+        sources_changed = input_basenames != self._input_basenames
         self._empty_msg = empty_msg
         self._input_basenames = input_basenames
         self._sources = {}  # 输入基名集合已更新，来源标签缓存全部失效
-        self._replace_cards(items)
+        # 只比较路径集合：文件数量没变时，元数据（size / mtime）变化或
+        # 输入目录变化都不该整页重建——前者只更新卡片上的大小/时间，
+        # 后者只更新来源徽章。真有增删才重建（按 mtime 倒序重排）。
+        same_paths = (
+            len(items) == len(self._items)
+            and {it[0] for it in items} == {it[0] for it in self._items}
+        )
+        if same_paths:
+            if items != self._items:
+                new_by_path = {it[0]: it for it in items}
+                for old_it, card in self._card_cache.items():
+                    new_it = new_by_path.get(old_it[0])
+                    if new_it is not None and new_it[1:] != old_it[1:]:
+                        card.update_meta(new_it[1], new_it[2])
+            if sources_changed:
+                for it, card in self._card_cache.items():
+                    label = self._item_source(it)
+                    if getattr(card, "_source", None) != label:
+                        card.set_badge(
+                            label, "success" if label == "已解密" else "warning"
+                        )
+                        card._source = label
+                # 分类筛选依赖来源标签，筛选项可能变化，需重算 _view
+                if self.filterCombo.currentText() != "全部" or self._filter.strip():
+                    self._relayout_lazy()
+            self._update_count()
+            (self.replay_from_top if refresh else self.replay_fade_in)()
+            return
+        self._replace_cards(items, refresh=refresh)
 
     def _on_search(self, text):
         self._filter = text

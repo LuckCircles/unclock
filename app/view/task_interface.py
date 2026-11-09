@@ -23,6 +23,7 @@ from ..common.config import cfg
 from ..common.decrypt_scanner import (
     build_decrypted_basenames,
     is_already_decrypted,
+    list_encrypted_files,
 )
 from ..common.logger import logger
 from ..common.signal_bus import signalBus
@@ -53,6 +54,15 @@ class TaskInterface(GridCardContainer):
         self._decrypted_names = set()
         # 首次扫描填充完成前抑制空提示（页面先出、卡片随后流式出现）
         self._filling = True
+        # 用户主动排除的路径（移出列表 / 清空列表 / 删除文件）刷新时不再
+        # 由目录扫描加回；手动添加且不在输入目录的文件继续随刷新保留。
+        # 「删除完成」只清视图、不登记排除，见 _remove_completed()。
+        self._excluded_paths = set()
+        self._manual_paths = set()
+        self._view_only_removal = False
+        # 重建期间需要继承的转换状态（解密中 / 失败），键为文件路径
+        self._preserve_status = {}
+        self._last_input_dir = cfg.input_dir.value
 
         # 工具栏：计数 + 按钮组（FluentIcon 走内置 SVG，无需系统字体，不会渲染成方块）
         self.countLabel = CaptionLabel("共 0 个文件", self)
@@ -79,7 +89,7 @@ class TaskInterface(GridCardContainer):
         signalBus.file_started.connect(self._on_file_started)
         signalBus.file_finished.connect(self._on_file_finished)
         signalBus.file_cancelled.connect(self._on_file_cancelled)
-        signalBus.paths_changed.connect(self.refresh_from_config)
+        signalBus.paths_changed.connect(self._on_paths_changed)
 
         # 启动不同步建卡：延后到事件循环首轮，并分批渐进填充——
         # 数百张卡的输入目录会把启动拖死数秒，现在窗口先出、卡片随后流式出现
@@ -88,9 +98,13 @@ class TaskInterface(GridCardContainer):
     # ------------------------------------------------------------ 基类钩子
     def _make_card(self, path: str) -> TaskCard:
         card = TaskCard(path, self)
-        # 加密文件按去后缀在输出目录命中 → 已解密
+        # 重建期间继承转换服务接管的在途状态（解密中 / 失败），避免刷新把
+        # 「解密中」冲回「待解密」；磁盘已有明文时仍以实际结果为准。
+        preserved = self._preserve_status.get(path)
         if is_already_decrypted(path, self._decrypted_names):
             card.set_status("success")
+        elif preserved:
+            card.set_status(preserved)
         # 右键菜单：删除文件 / 移出列表
         card.setContextMenuPolicy(Qt.CustomContextMenu)
         card.customContextMenuRequested.connect(
@@ -103,8 +117,14 @@ class TaskInterface(GridCardContainer):
         self._cards.sort(key=lambda c: _STATUS_ORDER.get(c.status, 9))
 
     def _on_card_removed(self, card):
+        path = card.file_path
+        if not self._view_only_removal:
+            # 用户主动移出 / 清空 / 删除文件：刷新时不再由目录扫描加回
+            self._excluded_paths.add(path)
+            self._manual_paths.discard(path)
+        self._preserve_status.pop(path, None)
         # 同步从转换服务待处理队列剔除该文件
-        signalBus.queue_remove.emit(card.file_path)
+        signalBus.queue_remove.emit(path)
 
     def _sync_overlay_geometry(self):
         super()._sync_overlay_geometry()
@@ -133,14 +153,17 @@ class TaskInterface(GridCardContainer):
             parts.append(f"已解密 {success}")
         if failed:
             parts.append(f"失败 {failed}")
-        if parts:
-            self.countLabel.setText(" · ".join(parts) + f" · 共 {count}")
-        else:
-            self.countLabel.setText(f"共 {count} 个文件")
+        text = (
+            " · ".join(parts) + f" · 共 {count}" if parts else f"共 {count} 个文件"
+        )
+        # 文本未变就不 setText：QLabel.setText 会 updateGeometry 并投递
+        # LayoutRequest，零重建刷新时无需惊动整页布局（与已解密页对齐）
+        if self.countLabel.text() != text:
+            self.countLabel.setText(text)
         if count == 0:
-            self.emptyHint.label.setText(
-                "暂无文件，点击“添加文件”、刷新列表，或直接拖入文件"
-            )
+            hint = "暂无文件，点击“添加文件”、刷新列表，或直接拖入文件"
+            if self.emptyHint.label.text() != hint:
+                self.emptyHint.label.setText(hint)
         self._set_empty_visible(count == 0)
 
     # ------------------------------------------------------------ 拖入文件
@@ -236,33 +259,98 @@ class TaskInterface(GridCardContainer):
         self.dropHint.setVisible(show)
 
     # ------------------------------------------------------------ 文件操作
+    def _on_paths_changed(self):
+        """目录配置变更：换输入目录时清空用户的排除/手工条目，再刷新。
+
+        仅输出目录变更（例如改了解密结果存放位置）不应把用户移出的文件
+        又加回来，所以按输入目录字符串是否变化来判断。
+        """
+        current = cfg.input_dir.value
+        if current != self._last_input_dir:
+            self._last_input_dir = current
+            self._excluded_paths.clear()
+            self._manual_paths.clear()
+        self.refresh_from_config()
+
     def refresh_from_config(self):
-        input_dir = cfg.input_dir.value
-        if input_dir and os.path.exists(input_dir):
-            self.scan_directory(input_dir)
+        # 目录被清空或失效时也必须刷新（清空旧卡片），不能让上一目录的
+        # 卡片残留；渐进填充避免大目录刷新时阻塞 UI
+        self.scan_directory(cfg.input_dir.value, progressive=True, refresh=True)
 
     def _startup_scan(self):
         """启动时的首次扫描：分批建卡（progressive），避免长列表卡住界面。"""
         self.scan_directory(cfg.input_dir.value, progressive=True)
 
-    def scan_directory(self, path: str, progressive: bool = False):
-        matched = []
-        if path and os.path.exists(path):
-            try:
-                for name in os.listdir(path):
-                    full = os.path.join(path, name)
-                    # 只纳入加密音乐文件；明文音频等非加密文件跳过
-                    if os.path.isfile(full) and is_encrypted_file(full):
-                        matched.append(full)
-            except OSError:
-                matched = []
-        elif progressive:
-            # 目录不存在：填充流程不会走到，手动解除空提示抑制
-            self._filling = False
-            self._update_count()
-            return
+    def scan_directory(self, path: str, progressive: bool = False,
+                       refresh: bool = False) -> list[str]:
+        """按目录扫描重建列表，返回本轮实际纳入的文件路径列表。
+
+        ``refresh=True`` 由用户点刷新 / 配置变更触发：呈现走「回顶部 +
+        自上而下逐张刷新」；内部扫描（启动首扫、开始解密兜底）保持原视点。
+        """
+        # 目录扫描规则由 common 层单点提供（只取顶层、只纳入加密文件）
+        matched = [p for p in list_encrypted_files(path)
+                   if p not in self._excluded_paths]
+        # 手动添加、不在输入目录的文件在刷新后继续保留（磁盘已删则剔除）
+        for p in list(self._manual_paths):
+            if os.path.isfile(p) and is_encrypted_file(p) and p not in matched:
+                matched.append(p)
+            else:
+                self._manual_paths.discard(p)
         self._decrypted_names = build_decrypted_basenames(cfg.output_dir.value)
-        self._replace_cards(matched, progressive=progressive)
+        # 「点刷新但输入目录没变」是最常见场景（与已解密页快速路径对齐）：
+        # 列表与扫描结果完全一致且无在途填充时，只同步已解密徽章与计数，
+        # 绝不摘挂网格——渐进重建期间 QScrollArea 的异步布局追赶会造成
+        # 行高压缩（卡片叠压）与视点跳顶，用户即见「卡片挤压晃动」
+        # 不能用「列表顺序相等」判定：`_relayout()` 会调用 `_sort_cards()`
+        # 按状态重排 `_cards`（待解密在上、已解密沉底），而 matched 是目录
+        # 扫描顺序。只要有任一卡片不是 pending（转换过 / 输出目录已有同名
+        # 明文），窗口缩放、切页、滚动条显隐触发过一次 _relayout 后两者
+        # 顺序就不同，快速路径永久失效——文件一个没变，每次点刷新仍走
+        # 全量渐进重建（实测 138 文件 / 30 张 success：resize 后
+        # current[0]=song030 vs matched[0]=song000），用户即见「刷新后
+        # 从顶部开始出现 / 整页跳顶再涌回」。这里只比较文件集合，集合
+        # 未变就零重建，并保持当前视觉顺序（最稳，无任何位移）。
+        current = [c.file_path for c in self._cards]
+        same_files = (
+            len(current) == len(matched) and sorted(current) == sorted(matched)
+        )
+        if same_files and not self.pending_items():
+            self._filling = False  # 首扫完成即解除空提示抑制（空目录正常显示空状态）
+            # 快速路径不建卡，清空上次重建留下的状态快照，避免陈旧状态
+            # 被后续「添加文件」误用
+            self._preserve_status = {}
+            # 状态按输出目录实况同步：磁盘已有明文时无论原状态（含失败 /
+            # 解密中）一律纠正为已解密；明文被移走时只让 pending / success
+            # 回退，running / failed 仍由转换服务接管，刷新不覆盖。
+            status_changed = False
+            for c in self._cards:
+                if is_already_decrypted(c.file_path, self._decrypted_names):
+                    expected = "success"
+                elif c.status in ("pending", "success"):
+                    expected = "pending"
+                else:
+                    expected = c.status
+                if c.status != expected:
+                    c.set_status(expected)
+                    status_changed = True
+            if status_changed:
+                # 立即按「待解密在上、已解密沉底」重排，避免之后任意一次
+                # 布局重算（窗口缩放 / 滚动条显隐）才突然整片沉底
+                self._relayout()
+            else:
+                self._update_count()
+            # 刷新：回顶部 + 自上而下逐张刷新；内部扫描：原地脉冲
+            (self.replay_from_top if refresh else self.replay_fade_in)()
+            return matched
+        # 重建前快照转换服务接管的在途状态，供新卡继承（渐进填充期间
+        # 到达的状态信号也会写入这张表，见 _on_file_* 回调）
+        self._preserve_status = {
+            c.file_path: c.status for c in self._cards
+            if c.status in ("running", "failed")
+        }
+        self._replace_cards(matched, progressive=progressive, refresh=refresh)
+        return matched
 
     def _add_files(self):
         files, _ = QFileDialog.getOpenFileNames(
@@ -283,6 +371,9 @@ class TaskInterface(GridCardContainer):
         - invalid：非加密文件被跳过数。
         """
         existing = {card.file_path for card in self._cards}
+        # 渐进填充期间尚未建卡的「在途条目」也要参与去重，否则同一文件
+        # 在填充未完成时被再次拖入/添加会建出两张卡（经基类封装，不碰内部队列）
+        existing.update(self.pending_items())
         # 输入/输出目录对比：扫描输出目录建已解密基名集合
         decrypted_names = build_decrypted_basenames(cfg.output_dir.value)
         result = {"added": 0, "duplicate": 0, "invalid": 0}
@@ -298,6 +389,10 @@ class TaskInterface(GridCardContainer):
                 continue
             existing.add(path)
             new_paths.append(path)
+            # 重新纳入用户此前移出的文件；登记为手工条目，刷新后仍保留
+            self._excluded_paths.discard(path)
+            self._manual_paths.add(path)
+            self._preserve_status.pop(path, None)
             result["added"] += 1
         if new_paths:
             self._decrypted_names = decrypted_names
@@ -305,8 +400,18 @@ class TaskInterface(GridCardContainer):
         return result
 
     def _remove_completed(self):
-        """移除状态为"已解密"的卡片。"""
-        self._remove_cards([c for c in self._cards if c.status == "success"])
+        """移除「已解密」卡片：只清视图，文件仍在磁盘。
+
+        刷新列表时这些文件应重新扫描并按输出目录实况显示（已解密），因此
+        不登记排除路径、也不清掉手工添加标记。此前与「移出列表」共用
+        ``_on_card_removed`` 的排除逻辑，导致刷新后列表长期缺文件，只有
+        重启（排除表清空）才重新出现。
+        """
+        self._view_only_removal = True
+        try:
+            self._remove_cards([c for c in self._cards if c.status == "success"])
+        finally:
+            self._view_only_removal = False
 
     def clear_files(self):
         self._clear_cards()
@@ -349,7 +454,7 @@ class TaskInterface(GridCardContainer):
         name = os.path.basename(card.file_path)
         self._remove_card(card)
         signalBus.log_emitted.emit(
-            f"已移出列表: {name}（文件保留，刷新后仍在输入目录会重新出现）", "info"
+            f"已移出列表: {name}（文件保留，刷新后不再出现在列表）", "info"
         )
 
     def get_file_paths(self) -> list[str]:
@@ -357,6 +462,10 @@ class TaskInterface(GridCardContainer):
 
     # ------------------------------------------------------------ 状态回调
     def _on_file_started(self, path: str):
+        # 渐进填充期间目标卡片可能尚未建出：状态写入快照供 _make_card 继承，
+        # 避免「重建中刷新 + 转换完成」把状态永久弄丢
+        if self._filling:
+            self._preserve_status[path] = "running"
         for card in self._cards:
             if card.file_path == path:
                 card.set_status("running")
@@ -365,15 +474,20 @@ class TaskInterface(GridCardContainer):
         self._update_count()
 
     def _on_file_finished(self, path: str, success: bool):
+        status = "success" if success else "failed"
+        if self._filling:
+            self._preserve_status[path] = status
         for card in self._cards:
             if card.file_path == path:
-                card.set_status("success" if success else "failed")
+                card.set_status(status)
                 break
         # 仅刷新右上角状态分布与计数，不重排网格——避免每转换一个文件整页卡片跳动
         self._update_count()
 
     def _on_file_cancelled(self, path: str):
         """用户停止任务：未处理完的文件（处理中 + 排队中）回退为「待解密」。"""
+        if self._filling:
+            self._preserve_status[path] = "pending"
         for card in self._cards:
             if card.file_path == path:
                 card.set_status("pending")

@@ -94,6 +94,15 @@ class TaskCard(CardWidget):
         except OSError:
             return ""
 
+    def update_meta(self, size, mtime):
+        """刷新时同步卡片上的大小 / 修改时间（文本未变不 setText）。
+
+        元数据变化不该触发整页重建；文本相同也不投递 LayoutRequest。
+        """
+        text = self._meta_text(self.file_path, (size, mtime))
+        if self.metaLabel.text() != text:
+            self.metaLabel.setText(text)
+
     def set_status(self, status: str):
         if status not in _STATUS_META:
             return

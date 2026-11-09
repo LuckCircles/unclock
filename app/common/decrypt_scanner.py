@@ -9,17 +9,44 @@
 import os
 from pathlib import Path
 
-from .utils import is_encrypted_file, target_basename
+from .utils import is_encrypted_file, is_music_file, target_basename
+
+
+def list_encrypted_files(input_dir) -> list:
+    """扫描输入目录顶层，返回加密文件路径列表（不递归、不含任何 UI 依赖）。
+
+    common 层单点提供目录扫描，供 view（任务页刷新 / 启动兜底）复用，
+    避免各层各自 os.listdir 产生规则漂移。
+    """
+    paths = []
+    if not input_dir or not os.path.isdir(input_dir):
+        return paths
+    try:
+        with os.scandir(input_dir) as it:
+            for entry in it:
+                try:
+                    if entry.is_file() and is_encrypted_file(entry.path):
+                        paths.append(entry.path)
+                except OSError:
+                    continue
+    except OSError:
+        return []
+    return paths
 
 
 def build_decrypted_basenames(output_dir) -> set:
-    """扫描输出目录，返回已解密文件的目标基名集合（去后缀）。"""
+    """扫描输出目录，返回已解密文件的目标基名集合（去后缀）。
+
+    只纳入常见音乐文件：um 的解密结果一定是音频，输出目录里的
+    ``song.txt`` / 封面图等同名基名文件不应让 ``song.kgm`` 被误判为已解密。
+    """
     names: set = set()
     if not output_dir or not os.path.isdir(output_dir):
         return names
     try:
         for name in os.listdir(output_dir):
-            if os.path.isfile(os.path.join(output_dir, name)):
+            full = os.path.join(output_dir, name)
+            if os.path.isfile(full) and is_music_file(name):
                 names.add(target_basename(name))
     except OSError:
         pass

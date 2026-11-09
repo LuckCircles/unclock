@@ -9,6 +9,8 @@ from qfluentwidgets import (
     CardWidget,
     FluentIcon,
     IconWidget,
+    ToolTipFilter,
+    ToolTipPosition,
 )
 
 
@@ -46,6 +48,13 @@ class PathCard(CardWidget):
         self.hLayout.addWidget(self.iconWidget, 0, Qt.AlignVCenter)
         self.hLayout.addLayout(self.textLayout, 1)
         self.hLayout.addWidget(self.openIcon, 0, Qt.AlignVCenter)
+
+        self.setToolTip(f"<b>{title}</b><br/>点击在文件管理器中打开")
+        self.setToolTipDuration(-1)  # 鼠标移开才隐藏
+        self.tipFilter = ToolTipFilter(
+            self, showDelay=300, position=ToolTipPosition.TOP
+        )
+        self.installEventFilter(self.tipFilter)
 
     def set_path(self, path: str, fallback: str):
         self.pathLabel.setText(path or fallback)

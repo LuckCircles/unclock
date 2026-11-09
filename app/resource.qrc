@@ -2,9 +2,10 @@
 <RCC version="1.0">
     <qresource prefix="/img">
         <file alias="interface.png">resources/img/interface.png</file>
-        <file alias="pwa.png">resources/img/pwa.png</file>
+        <file alias="um.png">resources/img/um.png</file>
         <file alias="ffmpeg.png">resources/img/ffmpeg.png</file>
-        <file alias="fliew.png">resources/img/fliew.png</file>
+        <file alias="qmpc.png">resources/img/qmpc.png</file>
         <file alias="task_complete.png">resources/img/task_complete.png</file>
+        <file alias="um.ico">resources/img/um.ico</file>
     </qresource>
 </RCC>

@@ -16,6 +16,8 @@ from qfluentwidgets import (
     PrimaryPushButton,
     ProgressBar,
     StrongBodyLabel,
+    ToolTipFilter,
+    ToolTipPosition,
 )
 
 from ..common.config import cfg
@@ -24,6 +26,15 @@ from ..common.signal_bus import signalBus
 from ..components.interface import Interface
 from ..components.path_card import PathCard
 from ..components.version_card import VersionCard
+
+# 三张工具检测卡片右下角分享按钮对应的官方网站 / 官方仓库。
+# 来源：um CLI 官方仓库（用户 2026-11-09 指定）、FFmpeg 官网、
+# docs/qmpc-mmkv-使用教程.md（官方仓库）。换网址只改这一处。
+TOOL_HOMEPAGES = {
+    "um": "https://git.um-react.app/um/cli",
+    "ffmpeg": "https://ffmpeg.org/",
+    "qmpc": "https://git.um-react.app/um/qmpc-mmkv",
+}
 
 
 class AutoResizeFlipView(HorizontalFlipView):
@@ -56,13 +67,16 @@ class HomeInterface(Interface):
 
         # 工具检测卡片（三卡均分，与下方路径卡片同构对齐）
         self.umCard = VersionCard(
-            "Unlock Music (um)", image("pwa.png"), "音乐解锁核心引擎"
+            "Unlock Music (um)", image("um.png"), "音乐解锁核心引擎",
+            homepage=TOOL_HOMEPAGES["um"],
         )
         self.ffmpegCard = VersionCard(
-            "FFmpeg", image("ffmpeg.png"), "音频转码 / 元数据写入"
+            "FFmpeg", image("ffmpeg.png"), "音频转码 / 元数据写入",
+            homepage=TOOL_HOMEPAGES["ffmpeg"],
         )
         self.qmpcCard = VersionCard(
-            "QMPC MMKV", image("fliew.png"), "QQ 音乐密钥自动提取"
+            "QMPC MMKV", image("qmpc.png"), "QQ 音乐密钥自动提取",
+            homepage=TOOL_HOMEPAGES["qmpc"],
         )
         self.umCard.set_detecting()
         self.ffmpegCard.set_detecting()
@@ -110,6 +124,12 @@ class HomeInterface(Interface):
         self.progressBar = ProgressBar(self)
         self.btnAction = PrimaryPushButton(FluentIcon.PLAY, "开始解密", self)
         self.btnAction.setFixedSize(160, 36)
+        self.btnAction.setToolTip("<b>开始解密</b><br/>扫描输入目录并批量转换加密音乐")
+        self.btnAction.setToolTipDuration(-1)  # 鼠标移开才隐藏
+        self.btnActionTip = ToolTipFilter(
+            self.btnAction, showDelay=300, position=ToolTipPosition.TOP
+        )
+        self.btnAction.installEventFilter(self.btnActionTip)
 
         self.controlLayout.addWidget(self.progressText, 0, Qt.AlignVCenter)
         self.controlLayout.addWidget(self.progressBar, 1)
@@ -130,6 +150,8 @@ class HomeInterface(Interface):
         self.btnAction.clicked.connect(self._on_action_clicked)
         self.inputDirCard.clicked.connect(self._open_input_dir)
         self.outputDirCard.clicked.connect(self._open_output_dir)
+        for card in (self.umCard, self.ffmpegCard, self.qmpcCard):
+            card.homepage_requested.connect(self._open_homepage)
         signalBus.tools_detected.connect(self._on_tools_detected)
         signalBus.toast_requested.connect(self._show_toast)
         signalBus.conversion_started.connect(self._on_conversion_started)
@@ -164,6 +186,11 @@ class HomeInterface(Interface):
             self._show_toast(f"{label}未设置或路径不存在", "warning")
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    def _open_homepage(self, url: str):
+        """工具卡片右下角分享按钮：用默认浏览器打开对应的官方网站。"""
+        if not url or not QDesktopServices.openUrl(QUrl(url)):
+            self._show_toast(f"无法打开官方网站：{url or '未配置'}", "warning")
 
     def _show_toast(self, message: str, level: str):
         """在主窗口右上角弹 InfoBar 浮层提示。"""
@@ -213,14 +240,17 @@ class HomeInterface(Interface):
             self.btnAction.setEnabled(True)
             self.btnAction.setText("停止解密")
             self.btnAction.setIcon(FluentIcon.CANCEL)
+            self.btnAction.setToolTip("<b>停止解密</b><br/>结束当前任务，已解密的文件会保留")
             return
 
         if state == "stopping":
             self.btnAction.setEnabled(False)
             self.btnAction.setText("正在收尾...")
             self.btnAction.setIcon(FluentIcon.SYNC)
+            self.btnAction.setToolTip("正在收尾，请稍候")
             return
 
         self.btnAction.setEnabled(True)
+        self.btnAction.setToolTip("<b>开始解密</b><br/>扫描输入目录并批量转换加密音乐")
         self.btnAction.setText("开始解密")
         self.btnAction.setIcon(FluentIcon.PLAY)

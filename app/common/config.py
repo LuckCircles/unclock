@@ -67,18 +67,31 @@ class Config(QConfig):
 
 cfg = Config()
 
-# 默认可执行文件位于项目 app/resources/ 目录
-_DEFAULT_UM = str(PROJECT_ROOT / "app" / "resources" / "um.exe")
-_DEFAULT_FFMPEG = str(PROJECT_ROOT / "app" / "resources" / "ffmpeg.exe")
-_DEFAULT_QMPC = str(PROJECT_ROOT / "app" / "resources" / "qmpc-mmkv-cli.exe")
+# 转换选项元数据：service 据此构建 um 参数、view 据此生成设置卡片，
+# 避免两层各自硬编码。`um_default_on` 为该参数在 um v0.2.20 中的默认值
+# （见 `um.exe --help`）；um 未提供这些参数的关闭形式，故「否」只能不传参。
+CONVERSION_OPTIONS = (
+    (cfg.remove_source, "删除源文件", "--rs", False),
+    (cfg.verbose, "详细输出", "-V", False),
+    (cfg.overwrite, "覆盖输出", "--overwrite", False),
+    (cfg.watch, "监听输入目录", "--watch", False),
+    (cfg.update_metadata, "更新封面", "--update-metadata", False),
+    (cfg.skip_noop, "跳过无动作解码器", "-n", True),
+)
 
+# 默认可执行文件位于项目根目录 tools/ 目录（与 app/ 同级）
+_DEFAULT_UM = str(PROJECT_ROOT / "tools" / "um.exe")
+_DEFAULT_FFMPEG = str(PROJECT_ROOT / "tools" / "ffmpeg.exe")
+_DEFAULT_QMPC = str(PROJECT_ROOT / "tools" / "qmpc-mmkv-cli.exe")
+
+# 加载前先记录配置文件是否存在（不依赖 qconfig.load 是否创建文件的实现细节），
+# 供下方「首次运行生成」判断
+_config_existed = Path(CONFIG_PATH).exists()
 qconfig.load(CONFIG_PATH, cfg)
 
-# 记录加载前是否已存在配置文件，供下方「首次运行生成」判断
-_config_existed = Path(CONFIG_PATH).exists()
-
-# 自动检测：优先使用 app/resources 内置工具——内置 exe 存在则覆盖持久化路径，
-# 这样打包后/开发模式下都能自动用内置工具；用户想改用外部路径需先移除内置 exe。
+# 自动检测：仅在「尚未配置」或「已配置路径失效」时回退到内置工具。
+# 用户显式设置且当前有效的外部路径必须保留——此前无条件覆盖会让设置页
+# 选的 um/ffmpeg/qmpc 路径在重启后失效（打包产物里用户也无法移除内置 exe）。
 # 仅在内存中覆盖（save=False），是否落盘由下方「首次运行生成」统一决定，
 # 避免启动时重复写盘、也避免覆盖用户已保存的目录等配置。
 for item, default_path in (
@@ -86,14 +99,17 @@ for item, default_path in (
     (cfg.ffmpeg_path, _DEFAULT_FFMPEG),
     (cfg.qmpc_path, _DEFAULT_QMPC),
 ):
+    current = item.value if isinstance(item.value, str) else ""
+    if current and Path(current).is_file():
+        continue  # 尊重用户已配置且有效的路径
     if Path(default_path).exists():
         qconfig.set(item, default_path, save=False)
-    elif not item.value or not Path(item.value).exists():
-        # 内置缺失时回退到默认占位路径（converter 启动时会报"未找到"）
+    elif not current:
+        # 内置也缺失时回退到默认占位路径（converter 启动时会报"未找到"）
         qconfig.set(item, default_path, save=False)
 
 # 首次运行（无配置文件）：按当前值生成默认配置并落盘——
-# 输入/输出目录为空；三个 exe 指向 app/resources（上方已探测）；其余取默认值。
+# 输入/输出目录为空；三个 exe 指向项目根 tools/（上方已探测）；其余取默认值。
 if not _config_existed:
     try:
         qconfig.save()
