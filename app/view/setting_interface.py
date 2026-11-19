@@ -8,6 +8,8 @@ from qfluentwidgets import (
     PushSettingCard,
     SettingCardGroup,
     SwitchSettingCard,
+    ToolTipFilter,
+    ToolTipPosition,
     qconfig,
 )
 
@@ -47,6 +49,23 @@ class SettingInterface(Interface):
         for card in (self.inputCard, self.outputCard, self.umPathCard, self.ffmpegPathCard, self.qmpcPathCard):
             self.basicGroup.addSettingCard(card)
         self.vLayout.addWidget(self.basicGroup)
+
+        # 「选择目录 / 选择文件」按钮提示：Fluent ToolTip（进入 300ms 显示）
+        self._buttonTips = []
+        for btn, tip in (
+            (self.inputCard.button, "<b>选择目录</b><br/>设置加密音乐所在的输入目录"),
+            (self.outputCard.button, "<b>选择目录</b><br/>设置解密结果的输出目录"),
+            (self.umPathCard.button, "<b>选择文件</b><br/>指定 um.exe 的路径"),
+            (self.ffmpegPathCard.button, "<b>选择文件</b><br/>指定 ffmpeg.exe 的路径"),
+            (self.qmpcPathCard.button, "<b>选择文件</b><br/>指定 qmpc-mmkv-cli.exe 的路径"),
+        ):
+            btn.setToolTip(tip)
+            btn.setToolTipDuration(-1)  # 鼠标移开才隐藏
+            tip_filter = ToolTipFilter(
+                btn, showDelay=300, position=ToolTipPosition.TOP
+            )
+            btn.installEventFilter(tip_filter)
+            self._buttonTips.append(tip_filter)
 
         # ===== 转换设置 =====
         self.convGroup = SettingCardGroup("转换设置", self.view)

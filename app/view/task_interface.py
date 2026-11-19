@@ -1,7 +1,7 @@
 # coding: utf-8
 """任务管理页面 —— 卡片式待转换文件列表（固定工具栏 + 滚动网格）。
 
-支持：添加文件 / 刷新列表 / 拖入文件（文件或目录，目录取顶层）/ 删除 / 清空；
+支持：添加文件 / 刷新列表 / 开始解密 / 拖入文件（文件或目录，目录取顶层）/ 删除；
 只纳入加密音乐文件（明文音频等非加密文件跳过）。
 """
 
@@ -15,6 +15,8 @@ from qfluentwidgets import (
     FluentIcon,
     MessageBox,
     RoundMenu,
+    ToolTipFilter,
+    ToolTipPosition,
     TransparentPushButton,
     qconfig,
 )
@@ -54,8 +56,8 @@ class TaskInterface(GridCardContainer):
         self._decrypted_names = set()
         # 首次扫描填充完成前抑制空提示（页面先出、卡片随后流式出现）
         self._filling = True
-        # 用户主动排除的路径（移出列表 / 清空列表 / 删除文件）刷新时不再
-        # 由目录扫描加回；手动添加且不在输入目录的文件继续随刷新保留。
+        # 用户主动排除的路径（移出列表 / 删除文件）刷新时不再由目录扫描
+        # 加回；手动添加且不在输入目录的文件继续随刷新保留。
         # 「删除完成」只清视图、不登记排除，见 _remove_completed()。
         self._excluded_paths = set()
         self._manual_paths = set()
@@ -71,9 +73,20 @@ class TaskInterface(GridCardContainer):
         self.btnAdd = TransparentPushButton(FluentIcon.ADD, "添加文件", self)
         self.btnRefresh = TransparentPushButton(FluentIcon.SYNC, "刷新列表", self)
         self.btnDelete = TransparentPushButton(FluentIcon.DELETE, "删除完成", self)
-        self.btnClear = TransparentPushButton(FluentIcon.BROOM, "清空列表", self)
-        for btn in (self.btnAdd, self.btnRefresh, self.btnDelete, self.btnClear):
+        # 与「添加文件 / 刷新列表」同一按钮组件；点击开始解密（与主页按钮同一信号）
+        self.btnStart = TransparentPushButton(FluentIcon.PLAY, "开始解密", self)
+        for btn in (self.btnAdd, self.btnRefresh, self.btnDelete, self.btnStart):
             self.toolbarLayout.addWidget(btn)
+
+        # 工具栏按钮提示：Fluent ToolTip（与主页 / 日志页一致，进入 300ms 显示）
+        self._buttonTips = []
+        for btn, tip in (
+            (self.btnAdd, "<b>添加文件</b><br/>选择一个或多个加密音乐文件加入列表"),
+            (self.btnRefresh, "<b>刷新列表</b><br/>重新扫描输入目录并同步已解密状态"),
+            (self.btnDelete, "<b>删除完成</b><br/>从列表移除已解密卡片，文件仍在磁盘，刷新可恢复"),
+            (self.btnStart, "<b>开始解密</b><br/>扫描输入目录并批量转换加密音乐"),
+        ):
+            self._install_tip(btn, tip)
 
         # 拖入提示浮层：拖文件经过时盖在滚动区上方（对鼠标透明，不拦正常操作）
         self.dropHint = QLabel("松开鼠标，添加至任务列表", self.scrollArea)
@@ -85,7 +98,7 @@ class TaskInterface(GridCardContainer):
         self.btnAdd.clicked.connect(self._add_files)
         self.btnRefresh.clicked.connect(self.refresh_from_config)
         self.btnDelete.clicked.connect(self._remove_completed)
-        self.btnClear.clicked.connect(self.clear_files)
+        self.btnStart.clicked.connect(signalBus.request_start.emit)
         signalBus.file_started.connect(self._on_file_started)
         signalBus.file_finished.connect(self._on_file_finished)
         signalBus.file_cancelled.connect(self._on_file_cancelled)
@@ -94,6 +107,15 @@ class TaskInterface(GridCardContainer):
         # 启动不同步建卡：延后到事件循环首轮，并分批渐进填充——
         # 数百张卡的输入目录会把启动拖死数秒，现在窗口先出、卡片随后流式出现
         QTimer.singleShot(0, self._startup_scan)
+
+    # ------------------------------------------------------------ 工具提示
+    def _install_tip(self, widget, text: str):
+        """安装 Fluent 风格按钮提示（过滤器由页面持有，避免被回收导致失效）。"""
+        widget.setToolTip(text)
+        widget.setToolTipDuration(-1)  # 鼠标移开才隐藏
+        tip = ToolTipFilter(widget, showDelay=300, position=ToolTipPosition.TOP)
+        widget.installEventFilter(tip)
+        self._buttonTips.append(tip)
 
     # ------------------------------------------------------------ 基类钩子
     def _make_card(self, path: str) -> TaskCard:
@@ -119,7 +141,7 @@ class TaskInterface(GridCardContainer):
     def _on_card_removed(self, card):
         path = card.file_path
         if not self._view_only_removal:
-            # 用户主动移出 / 清空 / 删除文件：刷新时不再由目录扫描加回
+            # 用户主动移出 / 删除文件：刷新时不再由目录扫描加回
             self._excluded_paths.add(path)
             self._manual_paths.discard(path)
         self._preserve_status.pop(path, None)
@@ -412,9 +434,6 @@ class TaskInterface(GridCardContainer):
             self._remove_cards([c for c in self._cards if c.status == "success"])
         finally:
             self._view_only_removal = False
-
-    def clear_files(self):
-        self._clear_cards()
 
     # ------------------------------------------------------------ 右键菜单
     def _show_card_menu(self, card, pos):

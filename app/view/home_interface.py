@@ -38,14 +38,24 @@ TOOL_HOMEPAGES = {
 
 
 class AutoResizeFlipView(HorizontalFlipView):
-    """item 尺寸跟随自身宽度的 Banner 轮播（全屏不露边）。"""
+    """item 尺寸跟随自身宽度的 Banner 轮播。
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
+    高度固定为窗口高度的三分之一（随窗口缩放实时换算），宽度拉满整行，
+    图片按“填满裁切”绘制；窗口高宽变化时由页面与自身 resize 统一同步。
+    """
+
+    def sync_geometry(self):
+        """按当前窗口高度重算横幅高度并同步 item 尺寸（幂等，可多次调用）。"""
+        host = self.window() or self
+        height = max(host.height() // 3, 1)
+        if height != self.height():
+            # 改高会再触发一次 resize：下一轮高度已相等，随即稳定
+            self.setFixedHeight(height)
+        self.setItemSize(QSize(self.width(), height))
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
-        self.setItemSize(self.size())
+        self.sync_geometry()
 
 
 class HomeInterface(Interface):
@@ -54,12 +64,11 @@ class HomeInterface(Interface):
     def __init__(self, parent=None):
         super().__init__("HomeInterface", parent)
 
-        # Banner 轮播（item 宽度自适应视口，全屏时铺满不裁边）
+        # Banner 轮播（宽 拉满整行，高 = 窗口高度三分之一，随窗口缩放实时同步）
+        banner_path = image("interface.png")
         self.flipView = AutoResizeFlipView(self)
-        self.flipView.setFixedHeight(220)
         self.flipView.setBorderRadius(16)
         self.flipView.setAspectRatioMode(Qt.KeepAspectRatioByExpanding)
-        banner_path = image("interface.png")
         if QFile.exists(banner_path):
             self.flipView.addImage(banner_path)
             self.flipView.setCurrentIndex(0)
@@ -145,6 +154,13 @@ class HomeInterface(Interface):
         self._connect_signals()
         self._set_button_state("idle")
         self.refresh_paths()
+
+    def resizeEvent(self, e):
+        """窗口尺寸变化：横幅高度按窗口高度的三分之一同步（宽高任一变化）。"""
+        super().resizeEvent(e)
+        flip = getattr(self, "flipView", None)
+        if flip is not None:
+            flip.sync_geometry()
 
     def _connect_signals(self):
         self.btnAction.clicked.connect(self._on_action_clicked)

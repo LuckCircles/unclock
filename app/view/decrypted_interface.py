@@ -20,6 +20,8 @@ from qfluentwidgets import (
     MessageBox,
     RoundMenu,
     SearchLineEdit,
+    ToolTipFilter,
+    ToolTipPosition,
     TransparentPushButton,
 )
 
@@ -147,6 +149,20 @@ class DecryptedInterface(GridCardContainer):
         self.toolbarLayout.addWidget(self.filterCombo)
         self.toolbarLayout.addWidget(self.btnRefresh)
         self.toolbarLayout.addWidget(self.btnOpenDir)
+
+        # 工具栏按钮提示：Fluent ToolTip（与任务页一致，进入 300ms 显示）
+        self._buttonTips = []
+        for btn, tip in (
+            (self.btnRefresh, "<b>刷新列表</b><br/>重新扫描输出目录并更新文件列表"),
+            (self.btnOpenDir, "<b>打开目录</b><br/>在文件管理器中打开输出目录"),
+        ):
+            btn.setToolTip(tip)
+            btn.setToolTipDuration(-1)  # 鼠标移开才隐藏
+            tip_filter = ToolTipFilter(
+                btn, showDelay=300, position=ToolTipPosition.TOP
+            )
+            btn.installEventFilter(tip_filter)
+            self._buttonTips.append(tip_filter)
 
         # 信号连接
         self.btnRefresh.clicked.connect(self.refresh)
