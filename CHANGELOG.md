@@ -11,6 +11,16 @@
 > 「刷新 = 屏幕闪一次、卡片位置与内容均不变」的契约。新契约为
 > **「刷新后列表回到顶部，卡片从第一张开始自上而下逐张刷新」**。
 
+### 文档：README 同步当前实现（2026-11-19）
+
+- **需求**：根据当前情况，修改 README 文件。
+- **修正 3 处与代码不符的旧描述**（`README.md`）：
+  1. 打包产物 `releases/音乐解锁工具.dist/…` → `releases/main.dist/音乐解锁工具.exe`：Nuitka standalone 目录名由入口脚本 `main.py` 决定，`--output-filename` 只改 exe 名（见 `build.py` 末尾注释）。
+  2. 「请将三个 exe 放入 `tools/`」→「已随仓库附带」：`git ls-files` 显示 `tools/um.exe` / `ffmpeg.exe` / `qmpc-mmkv-cli.exe` 均已跟踪，需换版本直接覆盖即可。
+  3. 「设置均以 `ComboBoxSettingCard` 呈现」「无任何自定义 QSS」两条已失效：路径卡片是 `PushSettingCard`、任务行为是 `SwitchSettingCard`；`marquee_label.py`（2 处）与 `task_interface.py`（1 处）存在局部 `setStyleSheet()`，改为「以官方 Fluent 组件与主题色为主，仅极少数局部样式」。
+- **补充当前功能**：主题三态 + `SystemThemeListener` 实时换肤链路、深色列表 `autoFillBackground(False)`、任务页状态排序、已解密页内嵌封面 / 5 项分类归类 / 120ms 搜索防抖 / 右键查看信息、`FileInfoDialog` 14 行单行值与路径点击定位、封面+标签一次 ffmpeg 探测与可见项优先双队列、性能设计表与 offscreen 实测数据、严格单向分层约束、新增 3 个源码文件与 2 篇 docs、文档索引、运行时文件表扩充（`.venv/` / `__pycache__/` / `.workbuddy/`）。
+- **验证**（仅文档，未打包）：文内 4 个本地链接 + 8 个关键路径全部存在；代码块围栏 6 个成对、5 个表格列数一致；14 行字段清单与 `file_info_dialog.py` 的 `rows` 逐项核对（是「码率」非「比特率」，且含「编码」）；「覆盖已转换」名称与 `SwitchSettingCard` 文案、`rotation="5 MB"` 日志配置、`_LAZY_PRELOAD_ROWS = 2` 均已核对。
+
 ### 优化：专辑封面按「当前屏幕优先」出图，不再按列表顺序排队（2026-11-19）
 
 - **需求**：不按照顺序展示，优先展示当前所展示界面的列表专辑图。
