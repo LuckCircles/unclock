@@ -2,7 +2,10 @@
 """通用工具：受支持格式判定、路径压缩、文件大小格式化、进程输出解析。"""
 
 import json
+import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 # 受 Unlock Music 支持的文件后缀集合
@@ -182,3 +185,26 @@ def simplify_process_line(line: str):
     if "error" in lower_text or "fatal" in lower_text:
         return text, "error"
     return text, "info"
+
+
+def open_file_location(path: str) -> bool:
+    """在文件管理器中打开文件所在目录并选中该文件（跨平台）。
+
+    Windows：``explorer /select,"path"``（选中文件）；macOS：``open -R``；
+    Linux：退化为打开所在目录（``xdg-open``，多数文件管理器不支持选中参数）。
+    路径不存在时返回 False，调用方据此给出提示。仅使用标准库，不依赖 UI 层。
+    """
+    if not path or not os.path.exists(path):
+        return False
+    folder = os.path.dirname(os.path.abspath(path))
+    try:
+        if sys.platform == "win32":
+            # /select, 后跟完整路径；explorer 忽略 -- 直接用 Popen 避免阻塞
+            subprocess.Popen(["explorer", "/select,", os.path.abspath(path)])
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", "-R", path])
+        else:
+            subprocess.Popen(["xdg-open", folder])
+        return True
+    except OSError:
+        return False

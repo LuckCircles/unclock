@@ -5,7 +5,14 @@ import os
 
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
-from qfluentwidgets import FluentIcon, MSFluentWindow, NavigationItemPosition
+from qfluentwidgets import (
+    FluentIcon,
+    MSFluentWindow,
+    NavigationItemPosition,
+    SystemThemeListener,
+    Theme,
+    setTheme,
+)
 
 from ..common.config import cfg
 from ..common.decrypt_scanner import classify_files
@@ -42,6 +49,7 @@ class MainWindow(MSFluentWindow):
         self.init_navigation()
         self.init_window()
         self.init_signals()
+        self.init_theme_listener()
 
         # 首次刷新与工具检测
         self.homeInterface.refresh_paths()
@@ -71,6 +79,42 @@ class MainWindow(MSFluentWindow):
     def init_signals(self):
         # 首页"开始" → 取任务页文件交给转换服务
         signalBus.request_start.connect(self._dispatch_start)
+
+    def init_theme_listener(self):
+        """监听系统深浅色变化，实现「跟随系统」模式的实时换肤。
+
+        官方 SystemThemeListener 在系统主题变化时只更新 qconfig.theme 并发
+        themeChanged / systemThemeChanged，不会刷新全局控件样式表（QSS）。
+        因此把 systemThemeChanged 接到 setTheme，由它调用 updateStyleSheet
+        完成全体控件换肤；listener 内部已保证仅 themeMode==AUTO 时才触发。
+        """
+        self.themeListener = SystemThemeListener(self)
+        self.themeListener.systemThemeChanged.connect(self._on_system_theme_changed)
+        self._theme_listener_stopped = False
+        self.themeListener.start()
+
+    def _on_system_theme_changed(self):
+        """系统主题变化 → 刷新全局样式表（listener 保证此时 themeMode==AUTO）。"""
+        setTheme(Theme.AUTO)
+
+    def _stop_theme_listener(self):
+        """停止系统主题监听线程（幂等：closeEvent 与 on_exit 都会调用）。
+
+        Windows 上 darkdetect.listener 是无限阻塞循环，无法用中断标志退出，
+        只能 terminate()；随后 deleteLater() 交回事件循环清理 QThread 对象。
+        """
+        if self._theme_listener_stopped:
+            return
+        self._theme_listener_stopped = True
+        listener = getattr(self, "themeListener", None)
+        if listener is not None:
+            listener.terminate()
+            listener.deleteLater()
+
+    def closeEvent(self, event):
+        """关闭窗口时停止监听线程，避免 QThread 仍在运行时被销毁。"""
+        self._stop_theme_listener()
+        super().closeEvent(event)
 
     def _dispatch_start(self):
         files = self.taskInterface.get_file_paths()
@@ -119,6 +163,7 @@ class MainWindow(MSFluentWindow):
 
     def on_exit(self):
         """应用退出前的清理钩子。"""
+        self._stop_theme_listener()
         try:
             self.converter.stop()
         except Exception as exc:  # noqa: BLE001

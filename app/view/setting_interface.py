@@ -11,6 +11,7 @@ from qfluentwidgets import (
     ToolTipFilter,
     ToolTipPosition,
     qconfig,
+    setTheme,
 )
 
 from ..common.config import CONVERSION_OPTIONS, cfg
@@ -23,6 +24,20 @@ class SettingInterface(Interface):
 
     def __init__(self, parent=None):
         super().__init__("SettingInterface", parent)
+
+        # ===== 外观设置 =====
+        # 与转换设置统一用 ComboBoxSettingCard：绑定库内置 themeMode（枚举型
+        # OptionsConfigItem），下拉项 texts 与 config.py 重排后的
+        # options（AUTO/LIGHT/DARK）一一对应。qconfig.set 只写配置 + 发
+        # themeChanged，另接 comboBox 信号到 setTheme 刷新全局 QSS。
+        self.appearanceGroup = SettingCardGroup("外观设置", self.view)
+        self.themeCard = ComboBoxSettingCard(
+            qconfig.themeMode, FluentIcon.BRUSH, "主题",
+            "跟随系统：自动采用系统浅色/深色偏好；也可手动指定。",
+            ["跟随系统", "浅色模式", "深色模式"], self.appearanceGroup,
+        )
+        self.appearanceGroup.addSettingCard(self.themeCard)
+        self.vLayout.addWidget(self.appearanceGroup)
 
         # ===== 基础设置 =====
         self.basicGroup = SettingCardGroup("基础设置", self.view)
@@ -95,11 +110,23 @@ class SettingInterface(Interface):
         self.vLayout.addStretch(1)
 
         # 信号
+        # 下拉框变化仅写入 themeMode 配置，需显式 setTheme 刷新全部控件样式表
+        self.themeCard.comboBox.currentIndexChanged.connect(self._on_theme_changed)
         self.inputCard.clicked.connect(self._select_input)
         self.outputCard.clicked.connect(self._select_output)
         self.umPathCard.clicked.connect(self._select_um)
         self.ffmpegPathCard.clicked.connect(self._select_ffmpeg)
         self.qmpcPathCard.clicked.connect(self._select_qmpc)
+
+    def _on_theme_changed(self, index):
+        """应用主题：setTheme 内部刷新全局样式表并持久化 themeMode。
+
+        下拉项 userData 存的是 Theme 枚举（ComboBoxSettingCard 写入 options）；
+        qconfig.set 已由卡片内部先执行，这里补做全局 QSS 刷新。
+        """
+        if index < 0:
+            return
+        setTheme(self.themeCard.comboBox.itemData(index))
 
     def _select_input(self):
         folder = QFileDialog.getExistingDirectory(self, "选择输入目录")

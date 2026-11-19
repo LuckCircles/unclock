@@ -103,6 +103,8 @@ class TaskInterface(GridCardContainer):
         signalBus.file_finished.connect(self._on_file_finished)
         signalBus.file_cancelled.connect(self._on_file_cancelled)
         signalBus.paths_changed.connect(self._on_paths_changed)
+        # 整批转换结束后统一重排一次，让已解密卡片沉底
+        signalBus.conversion_finished.connect(self._on_conversion_finished)
 
         # 启动不同步建卡：延后到事件循环首轮，并分批渐进填充——
         # 数百张卡的输入目录会把启动拖死数秒，现在窗口先出、卡片随后流式出现
@@ -133,6 +135,24 @@ class TaskInterface(GridCardContainer):
             lambda pos, c=card: self._show_card_menu(c, pos)
         )
         return card
+
+    def _item_status(self, path: str) -> str:
+        """预判条目状态（与 _make_card 判定同源），供重建前预排序使用。
+
+        已解密优先于在途状态：输出目录已有明文时，即使快照里记着
+        running / failed，也按已解密沉底——与 _make_card 完全一致。
+        """
+        if is_already_decrypted(path, self._decrypted_names):
+            return "success"
+        return self._preserve_status.get(path, "pending")
+
+    def _sort_items(self, items: list) -> list:
+        """重建前预排序：未解密在上、已解密沉底，同状态内保持扫描顺序。
+
+        渐进填充路径据此顺序逐张补格，初次加载 / 刷新后即为期望顺序，
+        无需等待窗口 resize 触发 _relayout 才突然重排。
+        """
+        return sorted(items, key=lambda p: _STATUS_ORDER.get(self._item_status(p), 9))
 
     def _sort_cards(self):
         # 待解密在上、已解密沉底，保持视觉稳定
@@ -512,3 +532,11 @@ class TaskInterface(GridCardContainer):
                 card.set_status("pending")
                 break
         self._update_count()
+
+    def _on_conversion_finished(self, *_):
+        """整批转换结束后统一重排一次：已解密沉底、未解密在上。
+
+        转换过程中逐文件只更新状态与计数、不重排整页（避免跳动）；
+        整批结束时一次性按状态排序，把已解密卡片集中到列表下方。
+        """
+        self._relayout()

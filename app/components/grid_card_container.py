@@ -8,6 +8,8 @@
 
 子类钩子：
 - ``_make_card(item)``：由条目构建单张卡片（必选）；
+- ``_sort_items(items)``：重建前对条目预排序（默认保持原顺序）——渐进填充路径
+  直接按此顺序逐张补格、不走 ``_sort_cards()``，故需在此保证初始顺序；
 - ``_sort_cards()``：重排前对 ``_cards`` 排序（默认保持既有顺序，仅即时页）；
 - ``_visible_cards()``：返回参与排布的卡片（默认全部，供搜索/过滤页覆写，仅即时页）；
 - ``_lazy_filter()``：懒加载页的条目过滤（默认全部条目）；
@@ -37,6 +39,7 @@ from PySide6.QtCore import (
     QSignalBlocker,
     Qt,
     QTimer,
+    QVariantAnimation,
 )
 from PySide6.QtWidgets import (
     QGraphicsOpacityEffect,
@@ -60,6 +63,18 @@ _H_SPACING = 12
 # 懒加载按此计算视口覆盖的行范围
 _V_SPACING = 10
 _ROW_H = 64
+# 占位格高度：实测 QSpacerItem 取 _ROW_H(64) 时「纯占位格行」stride=64，
+# 而卡片行 stride=74 —— 混合布局不等距，滚动条高度随物化逐行漂移、卡片
+# 位置累积偏移（历史「上下晃动」根因之一）。取 64+10 让所有行统一 stride
+# 74，与 _pin_content_height() 的 rows*(_ROW_H+_V_SPACING) 计算一致。
+_SPACER_H = _ROW_H + _V_SPACING
+# 视口外保留行数：超出 [视口-KEEP, 视口+KEEP] 的卡片回收为占位格。
+# 比 _LAZY_PRELOAD_ROWS(2) 大，避免小幅来回滚动反复建卡（单卡构建约 3.5ms）。
+_LAZY_KEEP_ROWS = 4
+# 回收卡片复用池上限：常驻卡片约 60 张，留一倍余量；超出直接销毁。
+# 实测滚完千级列表会触发 956 次 _make_card（单卡约 3.5ms，累计 3.3s），
+# 复用后只需首次建卡，后续滚动仅重绑文本/徽章/封面。
+_CARD_POOL_MAX = 96
 # 时间片分批建卡：单帧构建满此预算（毫秒）即让出事件循环。
 # 卡片构建耗时不一（磁盘 stat / 徽章控件创建），按时间切片比固定张数
 # 分批更能把每帧开销稳定压在一帧预算内，填充期间交互不卡顿。
@@ -91,6 +106,8 @@ class GridCardContainer(QWidget):
     lazy_fill = False
     # 瀑布流入场：新建卡片按网格顺序错峰淡入（只改绘制，不改几何）
     fade_in = True
+    # 回收卡片复用池上限（懒加载页覆写 _park_card 时使用）
+    card_pool_max = _CARD_POOL_MAX
 
     def __init__(self, object_name: str, parent=None):
         super().__init__(parent)
@@ -108,6 +125,11 @@ class GridCardContainer(QWidget):
         self._view = []         # 过滤排序后的展示条目
         self._card_cache = {}   # 已物化卡片：item → card
         self._spacer_at = {}    # 未物化占位格：item → QSpacerItem
+        self._spacer_pool = []  # 可复用占位格池（重排时零新建）
+        self._card_pool = []    # 回收可复用的卡片（子类决定如何重新绑定）
+        self._pos_of = {}       # item → 当前 _view 中的位置（回收定位）
+        self._last_view = None  # 上次重排的视图（视图+列数均未变则短路）
+        self._last_visible_items = None  # 上次通知子类的「屏幕内」条目（内容变化才再通知）
 
         # 视口 resize 重排防抖：拖拽缩放期间合并连续事件，停下后重排一次
         self._relayoutTimer = QTimer(self)
@@ -119,6 +141,9 @@ class GridCardContainer(QWidget):
         self._fade_queue = deque()
         self._fade_anims = {}
         self._fade_scheduled = 0  # 本次重建已排入淡入的累计张数（上限 40）
+        self._fade_started = 0        # 当前错峰批次已启动的张数
+        self._fade_batch_start = 0.0  # 批次起始单调时钟（按绝对时间补发）
+        self._batch_fade = None       # 滚动短淡入：(QVariantAnimation, cards)
         # 懒加载重建期间关闭物化入场动画（改由 replay_fade_in 整屏脉冲）
         self._suppress_materialize_fade = False
         self._fadeTimer = QTimer(self)
@@ -161,6 +186,11 @@ class GridCardContainer(QWidget):
         self.scrollLayout.addLayout(self.gridLayout)
         self.scrollLayout.addStretch(1)
         self.scrollArea.setWidget(self.scrollContent)
+        # setWidget() 会把内容控件的 autoFillBackground 置为 True，其 palette
+        # 的 Window 色不随主题切换（深色下仍是浅灰 #efefef）；卡片是半透明
+        # 白背景叠在其上 → 深色模式出现「浅底 + 白字」看不清。必须在
+        # setWidget() 之后关闭，让内容区透明、透出 viewport 的深色底。
+        self.scrollContent.setAutoFillBackground(False)
 
         # 懒加载：滚动到新区域时物化视口内占位格为真实卡片（即时页为空操作）
         self.scrollArea.verticalScrollBar().valueChanged.connect(
@@ -181,6 +211,15 @@ class GridCardContainer(QWidget):
         """由路径构建单张卡片（子类必须实现）。"""
         raise NotImplementedError
 
+    def _sort_items(self, items: list) -> list:
+        """重建前对条目预排序（默认保持原顺序）。
+
+        渐进填充路径（``_replace_cards(progressive=True)``）直接按条目顺序
+        逐张建卡补格，事后不再调用 ``_sort_cards()``；因此初始顺序必须在此
+        决定。子类按业务规则覆写（如任务页「未解密在上、已解密沉底」）。
+        """
+        return items
+
     def _sort_cards(self):
         """重排前排序钩子（默认保持既有顺序）。"""
 
@@ -191,6 +230,31 @@ class GridCardContainer(QWidget):
     def _lazy_filter(self) -> list:
         """懒加载页的条目过滤钩子（默认全部条目；搜索/分类页覆写）。"""
         return list(self._items)
+
+    def _reuse_card(self, item):
+        """从回收池取卡片并重新绑定条目；默认不复用（返回 None）。"""
+        return None
+
+    def _park_card(self, card):
+        """回收卡片：默认销毁；懒加载页覆写为放入池复用。"""
+        card.hide()
+        card.deleteLater()
+
+    def visible_items(self) -> tuple:
+        """当前视口内**实际可见**的展示条目（自上而下、自左而右）。
+
+        不含上下预载行——子类据此把有限的后台资源（封面 / 元数据探测）
+        只分给当前屏幕，而不是按整份列表顺序排队。封装成方法是为了不把
+        内部缓存直接暴露给 view 层。
+        """
+        return self._last_visible_items or ()
+
+    def _on_visible_items(self, items):
+        """屏幕内可见条目发生变化时的钩子（默认无操作，懒加载页可覆写）。
+
+        仅在可见内容真正变化时触发（滚动未跨行、视图短路重排均为零开销）。
+        ``items`` 顺序即网格展示顺序，供子类按「当前界面优先」调度任务。
+        """
 
     def _update_count(self):
         """刷新工具栏计数与空状态提示（子类必须实现）。"""
@@ -283,41 +347,94 @@ class GridCardContainer(QWidget):
         self._update_count()
 
     def _relayout_lazy(self):
-        """懒加载重排：全部条目铺占位格（滚动条高度正确），已建卡片原位回填。"""
-        self._clear_grid()
-        self._view = self._lazy_filter()
+        """懒加载重排：全部条目铺占位格（滚动条高度正确），已建卡片原位回填。
+
+        - 视图与列数均未变 → 跳过全部摘挂（零开销），仅按需物化；
+        - 否则卡片保留 parent/visible 回填，占位格从池复用；
+        - 被筛掉的卡片隐藏保留，回到视图时直接复用，不重建。
+        """
+        view = self._lazy_filter()
         available = max(self.scrollArea.viewport().width(), 0)
         cols = max(1, available // (_CARD_MIN_W + _H_SPACING))
         if cols > 1 and cols % 2:
             cols -= 1
-        for i, item in enumerate(self._view):
-            card = self._card_cache.get(item)
-            if card is not None:
-                self._grid_add_widget(card, i // cols, i % cols)
-            else:
-                sp = QSpacerItem(
-                    _CARD_MIN_W, _ROW_H, QSizePolicy.Expanding, QSizePolicy.Fixed
-                )
-                self._spacer_at[item] = sp
-                self.gridLayout.addItem(sp, i // cols, i % cols)
-        for col in range(max(self._grid_cols, cols)):
-            self.gridLayout.setColumnStretch(col, 0)
-        for col in range(cols):
-            self.gridLayout.setColumnStretch(col, 1)
+        old_cols = self._grid_cols
+        same = cols == old_cols and view == self._last_view
         self._grid_cols = cols
-        self.gridLayout.activate()
-        self._pin_content_height((len(self._view) + cols - 1) // cols)
+        if same:
+            # 列表相等 + 列数不变：网格位置本就正确，不摘不挂
+            self._materialize_visible()
+            self._update_count()
+            return
+
+        self._view = view
+        self._pos_of = {it: i for i, it in enumerate(view)}
+        detached = self._clear_grid()
+        self.scrollArea.setUpdatesEnabled(False)
+        try:
+            placed = set()
+            for i, item in enumerate(view):
+                card = self._card_cache.get(item)
+                if card is not None:
+                    # parent 未变：addWidget 不迁移、不 hide，故不 show
+                    self.gridLayout.addWidget(card, i // cols, i % cols)
+                    if not card.isVisible():
+                        card.show()   # 仅恢复此前被筛掉而隐藏的卡片
+                    placed.add(id(card))
+                else:
+                    sp = self._new_spacer()
+                    self._spacer_at[item] = sp
+                    self.gridLayout.addItem(sp, i // cols, i % cols)
+            for card in detached:
+                if id(card) not in placed and card.isVisible():
+                    card.hide()
+            for col in range(max(old_cols, cols)):
+                self.gridLayout.setColumnStretch(col, 0)
+            for col in range(cols):
+                self.gridLayout.setColumnStretch(col, 1)
+            self.gridLayout.activate()
+            self._pin_content_height((len(view) + cols - 1) // cols)
+        finally:
+            self.scrollArea.setUpdatesEnabled(True)
+        self._last_view = list(view)
         self._materialize_visible()
         self._update_count()
 
     def _clear_grid(self):
-        """摘除网格内全部 item（卡片脱离父对象待回填，占位符直接丢弃）。"""
+        """摘除网格内全部 item（卡片保留 parent，占位格回收进池）。
+
+        懒加载重排的关键优化：卡片**不脱离 parent**（仍是 scrollContent
+        子控件、保持 visible），只从布局摘除。实测 ``setParent(None)`` →
+        ``addWidget`` → ``show`` 的往返会触发 Fluent style_sheet 事件过滤器
+        数千次，占一次重排约 80% 耗时；保留 parent 后 116ms → 21ms（5.6×）。
+
+        返回摘下的 widget，供 ``_relayout_lazy`` 把「未参与新视图」的卡片
+        隐藏（不销毁，回到视图时直接复用）。QSpacerItem 是纯几何对象，
+        进池复用，避免每次重排新建 N 个。
+        """
+        detached = []
         while self.gridLayout.count():
             item = self.gridLayout.takeAt(0)
             w = item.widget()
             if w is not None:
-                w.setParent(None)
+                detached.append(w)
+            else:
+                self._spacer_pool.append(item)
         self._spacer_at.clear()
+        # 网格已被外部清空：强制下次重排走全量路径，不能短路
+        self._last_view = None
+        # 视图即将改变：作废可见集合，确保物化后重新通知子类提权
+        # （否则分类/搜索切换后，新屏幕上的条目可能仍排在普通队列末尾）
+        self._last_visible_items = None
+        return detached
+
+    def _new_spacer(self):
+        """从池取占位格（不足才新建），高度统一 _SPACER_H 保证行等距。"""
+        if self._spacer_pool:
+            return self._spacer_pool.pop()
+        return QSpacerItem(
+            _CARD_MIN_W, _SPACER_H, QSizePolicy.Expanding, QSizePolicy.Fixed
+        )
 
     # ------------------------------------------------------------ 瀑布流入场
     def _cancel_fade_in(self):
@@ -337,6 +454,8 @@ class GridCardContainer(QWidget):
                 pass
         self._fade_queue.clear()
         self._fade_scheduled = 0
+        self._fade_started = 0
+        self._cancel_batch_fade()
         for card, anim in list(self._fade_anims.items()):
             anim.stop()
             self._restore_fade(card)
@@ -392,9 +511,22 @@ class GridCardContainer(QWidget):
         if stagger:
             self._fade_scheduled += len(prepared)
         if not stagger:
-            # 滚动新物化：同批短淡入，不拖慢滚动观感
-            for card in prepared:
-                self._start_fade(card, _FADE_SCROLL_MS)
+            # 滚动新物化：整批共用一个动画对象。原实现每卡一个
+            # QPropertyAnimation，快速滚动时在途峰值实测 28 个，与滚动
+            # 事件抢事件循环；改为单 QVariantAnimation 逐卡刷 opacity。
+            self._cancel_batch_fade()
+            cards_ref = tuple(prepared)
+            anim = QVariantAnimation(self)
+            anim.setStartValue(0.0)
+            anim.setEndValue(1.0)
+            anim.setDuration(_FADE_SCROLL_MS)
+            anim.setEasingCurve(QEasingCurve.OutCubic)
+            anim.valueChanged.connect(
+                lambda v, cs=cards_ref: self._apply_batch_opacity(cs, v)
+            )
+            anim.finished.connect(lambda: self._finish_batch_fade(anim))
+            self._batch_fade = (anim, cards_ref)
+            anim.start()
             return
         if self._fadeTimer.isActive() or self._fade_queue:
             # 上一批仍在错峰：本批接队尾，保持全局自上而下的出现顺序
@@ -404,7 +536,43 @@ class GridCardContainer(QWidget):
         self._start_fade(first, _FADE_DURATION_MS)
         self._fade_queue.extend(rest)
         if rest:
+            # 记录批次起点：QTimer 在 Windows 上约 15.6ms 分辨率且常延迟，
+            # 逐张启动会把延迟一拍拍累积；节拍器改按绝对时间补发。
+            self._fade_batch_start = time.monotonic()
+            self._fade_started = 1
             self._fadeTimer.start()
+
+    def _apply_batch_opacity(self, cards, value):
+        """批量短淡入：单动画逐卡刷同一 opacity（卡片可能已被回收）。"""
+        v = float(value)
+        for card in cards:
+            effect = getattr(card, "_fade_effect", None)
+            if effect is not None:
+                try:
+                    effect.setOpacity(v)
+                except RuntimeError:
+                    pass
+
+    def _finish_batch_fade(self, anim):
+        """批量短淡入结束：卸载全部 effect，回到原生绘制。"""
+        if self._batch_fade is None or self._batch_fade[0] is not anim:
+            return
+        _, cards = self._batch_fade
+        self._batch_fade = None
+        for card in cards:
+            self._restore_fade(card)
+        anim.deleteLater()
+
+    def _cancel_batch_fade(self):
+        """中止批量短淡入（重建 / 滚动收敛前调用）。"""
+        if self._batch_fade is None:
+            return
+        anim, cards = self._batch_fade
+        self._batch_fade = None   # 先置空，防 stop() 触发 finished 重入
+        anim.stop()
+        for card in cards:
+            self._restore_fade(card)
+        anim.deleteLater()
 
     def replay_from_top(self):
         """刷新呈现（当前契约）：滚回列表顶部 + 卡片从第一张起自上而下逐张刷新。
@@ -517,20 +685,37 @@ class GridCardContainer(QWidget):
         anim.deleteLater()
 
     def _fade_tick(self):
-        """节拍器：每次放出一张卡片淡入，队列空即停。"""
-        while self._fade_queue:
+        """节拍器：按绝对时间一次放出所有「到点」卡片，队列空即停。
+
+        固定 16ms 的 QTimer 在 Windows 上实际约 15.6ms 分辨率且常延迟；
+        若每次只放一张，延迟会一拍拍累积，整屏铺开忽快忽慢。改为以批次
+        起点为基准算出应启动张数，延迟时一次补发多张，节奏贴合设计曲线。
+        """
+        if not self._fade_queue:
+            self._fadeTimer.stop()
+            self._fade_started = 0
+            return
+        elapsed = (time.monotonic() - self._fade_batch_start) * 1000
+        due = int(elapsed // _FADE_STAGGER_MS) + 1
+        while self._fade_queue and self._fade_started < due:
             card = self._fade_queue.popleft()
+            self._fade_started += 1
             if getattr(card, "_fade_cancelled", False):
                 continue
             self._start_fade(card, _FADE_DURATION_MS)
-            break
         if not self._fade_queue:
             self._fadeTimer.stop()
+            self._fade_started = 0
 
     # ------------------------------------------------------------ 懒加载物化
     def _on_lazy_scroll(self, _value):
-        """滚动条移动 → 物化视口内占位格（即时页为空操作）。"""
+        """滚动条移动 → 收敛在途淡入 + 物化视口内占位格（即时页为空操作）。"""
         if self.lazy_fill:
+            # 滚动时几十个 QGraphicsOpacityEffect 参与每帧离屏合成、错峰
+            # 节拍器又与滚动事件抢事件循环，是掉帧主因。滚动本身是连续
+            # 视觉变化，直接让瀑布流卡片完全显示比叠加淡入更顺滑。
+            if self._fadeTimer.isActive() or self._fade_queue:
+                self._cancel_fade_in()
             self._materialize_visible(stagger=False)
 
     def _materialize_visible(self, stagger: bool = True):
@@ -565,21 +750,23 @@ class GridCardContainer(QWidget):
             sp = self._spacer_at.pop(item, None)
             if sp is not None:
                 self.gridLayout.removeItem(sp)
-            card = self._make_card(item)
+                self._spacer_pool.append(sp)   # 复用，回收时再取
+            card = self._reuse_card(item)   # 优先复用回收卡片
+            if card is None:
+                card = self._make_card(item)
             card._lazy_item = item  # 反向映射：移除时由卡片找回条目
             self._card_cache[item] = card
             self._grid_add_widget(card, pos // cols, pos % cols)
             new_cards.append((pos, card))
             changed = True
-        if changed:
-            # 动态 addWidget 会把布局重新置脏：占位格状态下算出的行高是
-            # 临时值（实测 72），卡片填入后的真实行高是 74。若此时不收敛，
-            # 之后任意一次 Qt 布局补算（例如刷新时 countLabel.setText 引发的
-            # LayoutRequest）都会把整片卡片按新行高重排，越靠下累积位移越大
-            # —— 这就是「点刷新后卡片上下晃动」。物化完立即 activate，
-            # 保证任意时刻网格几何都已是最终值、后续重排为零位移。
+        # 视口外卡片回收为占位格：常驻卡片数始终与可见范围相当
+        recycled = self._recycle_offscreen(first_row, last_row)
+        if changed or recycled:
+            # 动态 addWidget / removeWidget 会把布局置脏：物化与回收后都
+            # 立即收敛，保证任意时刻网格几何已是最终值（后续 LayoutRequest
+            # 零位移，避免「点刷新后卡片上下晃动」）。
             self.gridLayout.activate()
-            if not self._suppress_materialize_fade:
+            if not self._suppress_materialize_fade and new_cards:
                 # 几何收敛后再挂透明度效果：新建卡片错峰淡入。
                 # 顺序以「当前可见区域」为起点（区内仍自上而下），视口外上下
                 # 各 2 行的预载卡片排到最后——否则滚到中部刷新时，用户会先等
@@ -589,6 +776,55 @@ class GridCardContainer(QWidget):
                     row_top = (pos // cols) * stride
                     (in_view if y0 <= row_top <= y1 else preload).append(card)
                 self._schedule_fade_in(in_view + preload, stagger=stagger)
+        # 通知子类「当前屏幕上真正可见的条目」：按视口 y 范围算，**不含**
+        # 上下各 2 行的预载行。可见内容变化才通知（行内小幅滚动零开销），
+        # 子类据此把封面等后台探测优先分给当前屏幕而非整份列表顺序。
+        vis_first = max(int(y0 // stride), 0)
+        vis_last = min(int(y1 // stride), (len(self._view) - 1) // cols)
+        visible_items = (
+            tuple(self._view[vis_first * cols: (vis_last + 1) * cols])
+            if vis_last >= vis_first else ()
+        )
+        if visible_items != self._last_visible_items:
+            self._last_visible_items = visible_items
+            self._on_visible_items(visible_items)
+
+    def _recycle_offscreen(self, first_row: int, last_row: int) -> bool:
+        """把远离视口的真实卡片回收为占位格（懒加载页的算法核心）。
+
+        实测：不回收时滚过千级列表会累积 876 张真实卡片，此后一次
+        ``_relayout_lazy`` 耗时 2676ms（近 3 秒假死）；回收后常驻卡片
+        稳定在几十张。保留窗口（±_LAZY_KEEP_ROWS 行）刻意大于物化预载
+        窗口（±2 行），避免临界处小幅来回滚动反复建卡 / 拆卡。
+        """
+        if not self._card_cache or not self._view:
+            return False
+        cols = self._grid_cols
+        total_rows = (len(self._view) - 1) // cols
+        keep_first = max(first_row - _LAZY_KEEP_ROWS, 0)
+        keep_last = min(last_row + _LAZY_KEEP_ROWS, total_rows)
+        recycled = False
+        for item, card in list(self._card_cache.items()):
+            pos = self._pos_of.get(item)
+            if pos is None:
+                # 已被筛出当前视图：卡片已隐藏且不在网格中，回收进池
+                self._forget_fade(card)
+                self._card_cache.pop(item, None)
+                self._park_card(card)
+                recycled = True
+                continue
+            row = pos // cols
+            if keep_first <= row <= keep_last:
+                continue
+            self._forget_fade(card)
+            self.gridLayout.removeWidget(card)
+            self._card_cache.pop(item, None)
+            self._park_card(card)          # 隐藏入池，不销毁
+            sp = self._new_spacer()
+            self.gridLayout.addItem(sp, pos // cols, pos % cols)
+            self._spacer_at[item] = sp
+            recycled = True
+        return recycled
 
     # ------------------------------------------------------------ 卡片管理
     def pending_items(self) -> list:
@@ -615,6 +851,10 @@ class GridCardContainer(QWidget):
         ``refresh=True`` 表示由「刷新」触发：重建后回到列表顶部并自上而下
         逐张刷新（当前呈现契约）；内部扫描触发的重建保持原视点与原地反馈。
         """
+        # 重建前按子类规则预排序条目：渐进填充路径直接按此顺序逐张补格，
+        # 不会再走 _sort_cards()，因此初始显示顺序必须在这里定好。
+        # 稳定排序保证同状态内维持目录扫描/手工添加的相对次序。
+        paths = self._sort_items(paths)
         # 旧列表即将销毁：先中止其淡入动画，避免动画回调触碰已删除卡片
         self._cancel_fade_in()
         self._fill_refresh = refresh
@@ -640,11 +880,13 @@ class GridCardContainer(QWidget):
             self.scrollArea.setUpdatesEnabled(False)
             try:
                 self._pending_paths = deque()
-                for c in self._card_cache.values():
+                # 回收池里的卡片不在 _card_cache 中，重建时一并销毁
+                for c in list(self._card_cache.values()) + self._card_pool:
                     # 先隐藏再 deleteLater：可见且被摘掉父控件的 QWidget
                     # 会短暂成为顶层窗口，在下一帧闪现成「跳出的卡片」
                     c.hide()
                     c.deleteLater()
+                self._card_pool.clear()
                 self._card_cache.clear()
                 self._clear_grid()
                 self._items = list(paths)

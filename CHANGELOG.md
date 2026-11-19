@@ -11,6 +11,195 @@
 > 「刷新 = 屏幕闪一次、卡片位置与内容均不变」的契约。新契约为
 > **「刷新后列表回到顶部，卡片从第一张开始自上而下逐张刷新」**。
 
+### 优化：专辑封面按「当前屏幕优先」出图，不再按列表顺序排队（2026-11-19）
+
+- **需求**：不按照顺序展示，优先展示当前所展示界面的列表专辑图。
+- **根因（逐代码定位）**：`_ensure_all_media()` 在切「歌手名 / 专辑名」时把 `self._items` 全量按 mtime 顺序一次性 `QThreadPool.start()`；池队列是 **FIFO**，当前视口内卡片的封面任务排在几百上千个任务之后，屏幕上会长时间停留在占位图。滚到中部后更明显——可见项由 `_apply_cover()` 登记时早已被全量队列占位，旧 `_media_pending` 去重直接 return，连插队机会都没有。
+- **方案（`app/components/grid_card_container.py`）**：
+  - 新增 `visible_items()` 封装（返回**真实视口**内条目，不含上下各 2 行预载）与 `_on_visible_items(items)` 空钩子；`_materialize_visible()` 末尾按 `y0/y1` 算可见范围，仅在可见内容变化时通知子类（行内小幅滚动零开销）。
+  - `_clear_grid()` 重置 `_last_visible_items`：分类 / 搜索 / 刷新导致视图变化后强制重新提权，避免新屏幕上的条目仍排在普通队列末尾。
+- **方案（`app/view/decrypted_interface.py`）**：把「一次性全量入池」改为**双队列 + 按在途上限喂入**：
+  - 状态：`_media_urgent`（视口可见，`appendleft` 队首优先）、`_media_normal`（全量补探测 FIFO）、`_media_queued` / `_media_urgent_set` / `_media_inflight` 三组去重状态，替换原单一 `_media_pending`。
+  - `_ensure_media(item, priority=False, pump=True)`：`priority=True` 时若条目还在普通队列，复制一份插到 urgent 队首（原位置出队时按 `_media_queued` 判重自动作废）；已在 ffmpeg 中的不抢占、不重复提交。
+  - `_pump_media()`：始终只保持最多 2 个在途，每次登记 / 每次结果回填都补喂一次——新可见项最多等 1 个任务（约几十毫秒）即可插队，而不是等整份列表跑完；`_take_media_item()` 先 urgent 后 normal。
+  - `_on_visible_items()` 覆写：`reversed + appendleft` 让最上方卡片排队首，屏幕内仍自上而下出图；`_ensure_all_media()` 末尾 `_prioritize_visible_items()` 兜底钩子未触发的情形。
+  - `_prune_media_queue()`：列表重建后丢弃已删除文件的排队项（在途的两个跑完自然作废，QRunnable 无取消接口）。
+  - `_on_filter_changed()` 顺序反转为**先 `_relayout()`（物化并提权可见项）再 `_ensure_all_media()`**；反序会让全量任务先占满 2 个线程。`_on_media_done()` 回填后新增 `_pump_media()` 补喂，归类防抖重排行为不变。
+- **关键坑（实测）**：
+  - 原 `_media_pending` 把「排队中」与「运行中」混成一个集合：可见项若已在队列就无从提权，若已提交又会被重复登记。必须拆成 `queued` / `inflight` 两组。
+  - 不能靠 `QThreadPool.start(runnable, priority)` 解决：优先级只影响**尚在池队列里**的任务，已一次性入队的千级任务前两个照样先跑，且无法随滚动动态重排；改为主线程自管队列才可控。
+  - 可见范围必须排除 `_LAZY_PRELOAD_ROWS` 预载行，否则上下各 2 行的不可见卡片会稀释真正屏幕内条目的优先级。
+- **验证（仅源码，未打包）**：py_compile 全量 13 文件通过；`_verify_visible_first.py` 15 组断言 ALL PASS（可见项插队顺序、排队项提权、在途去重与上限 2、三缓存回填、无重复提交、重建清理、切分类顺序、真实滚动钩子、首屏可见 36 项 / 中部 40 项、即时页零影响、缓存命中、归类防抖、首屏几何、内容高度 18490→18490、视图短路对象身份）；offscreen 启动 15s 无错误日志、`config.json` 前后 md5 一致；分层依赖违规 0。
+- 注：在途的 2 个 ffmpeg 任务不可抢占，故「优先」的语义是**最多等 1 个任务完成**即可让当前屏幕出图，而非瞬时中断。全量标签探测仍在后台按序补齐，归类排序结果不受影响。临时脚本已清理。
+
+### 优化：已解密列表流畅性与动画丝滑度（2026-11-19）
+
+- **需求**：优化已解密列表的算法，提高显示列表的流畅性和动画的丝滑度。
+- **基准（逐代码读取 + `_bench_decrypted.py` 实测，真实视口 1140×623）**：
+  - `_relayout_lazy` @1000 ≈ 97ms；连续输入 6 字符 @1000 526ms、@3000 861ms（每敲一键全量重建）。
+  - 滚到底常驻卡片 876 张、一次视图变化重排 2676ms；滚动全程 `_make_card` 真实建卡 956 次；在途淡入动画峰值 28 个。
+  - 根因：① 每次重排 `takeAt` + `setParent(None)` + `deleteLater` 全量销毁重建；② 卡片滚出视口不回收，越滚越多；③ 视图未变仍走完整 `_clear_grid` → `_relayout_lazy`；④ 每张卡一个 `QPropertyAnimation` + QTimer 逐拍错峰、延迟累积；⑤ 搜索无防抖、每键全量过滤且重复 `os.path.basename().lower()`；⑥ 媒体探测走 `QThreadPool.globalInstance()`（12 线程）与转换/扫描抢线程。
+- **方案（`app/components/grid_card_container.py`）**：
+  - 新增常量 `_SPACER_H = _ROW_H + _V_SPACING`（占位格与卡片行 stride 统一 74）、`_LAZY_KEEP_ROWS = 4`、`_CARD_POOL_MAX = 96`。
+  - `_clear_grid()` 改为**保留 parent 摘挂**（`takeAt` 后不 `setParent(None)`）+ 占位格进 `_spacer_pool` + 重置 `_last_view`，返回 detached widgets 供复用。
+  - `_relayout_lazy()` 增加视图/列数未变短路：`same` 时只 `_materialize_visible()` + `_update_count()`；视图变化才按 `_pos_of` 回填，隐藏筛掉的卡片、复用占位格。
+  - 新增 `_recycle_offscreen(first_row, last_row)` 回收视口外卡片入池并补占位格；`_materialize_visible()` 优先 `_reuse_card(item)`；物化/回收后立即 `gridLayout.activate()`。
+  - 动画：`_schedule_fade_in(stagger=False)` 由**单个 `QVariantAnimation`** 批量驱动所有新卡片 opacity（原每卡一个）；`_fade_tick()` 按 `time.monotonic()` 绝对时间一次补发多张，消除 QTimer 延迟累积；`_cancel_fade_in()` / `_on_lazy_scroll()` 取消在途瀑布流并卸载 effect。
+- **方案（`app/view/decrypted_interface.py`）**：
+  - `_SEARCH_DEBOUNCE_MS = 120` 防抖（`_on_search` 只记 `_filter` 并启单次 `QTimer`，`_apply_search` 才重排）；`_name_lower` 缓存 path → 小写 basename，`_on_scan_done()` 清空。
+  - `_MEDIA_MAX_THREADS = 2` 专用 `_media_pool = QThreadPool(self)`，不再占满 globalInstance。
+  - `_card_pool` + `_park_card()`（隐藏入池，超 `card_pool_max` 才 `deleteLater`）+ `_reuse_card()`（重绑 `file_path` / `_lazy_item` / `_source` / `nameLabel` / `metaLabel` / `badge` / `cover`，清掉上一文件 hover 状态）。
+- **方案（`app/components/task_card.py`）**：`set_badge()` 增加 `(text, kind)` 早退，复用/重复刷新不再销毁重建 `InfoBadge`。
+- **关键坑（实测）**：
+  - 占位格高 64 与卡片行 stride 74 不等距 → 混合行 `[74, 64, ...]`，内容高度随物化漂移；统一 `_SPACER_H` 后实测 18490 → 18490 稳定。
+  - `setParent(None)` 摘挂 116ms → 保留 parent 20.77ms（**5.6×**）。
+  - cProfile 显示「滚到底后重排慢」不在 `_relayout()`（12.8–23ms），而是后续 `processEvents()` 中滚动条 range 变化触发 `_on_lazy_scroll()` 物化 43 张新卡（320ms）→ 卡片池解决。
+  - offscreen 基准须把页面作顶层窗口 `resize(1200, 760)` + `show()` + 多轮 `processEvents()`，否则视口只有 98×28、滚动/动画数据失真。
+- **验证（仅源码，未打包）**：py_compile 全量 13 文件通过；`_verify_listperf.py` 11 项 ALL PASS（首屏几何 / 滚到底回收 / 内容高度不漂移 / 滚回中部 / 搜索过滤 / 清空恢复 / 视图短路对象身份保持 / 切分类 / 刷新重建 / 即时页回归）；`_verify_perf_final.py` 11 项 ALL PASS（防抖 / 小写缓存 / 线程池限流 / 归类回归 / 错峰补发 / 动画取消 / 单动画批量淡入 / 滚动收敛 / 复用池）；清理后重跑复核仍 ALL PASS。
+- **实测提速**：视图未变重排 97 → 0.38ms；连续输入 6 字符 @1000 526 → 3.38ms、@3000 861 → 10.31ms；滚到底常驻卡 876 → 约 60；滚到底后重排 2676 → 逻辑 9~23ms / 含事件循环 57~135ms；滚动全程真实建卡 956 → 32；在途动画峰值 28 → 2；A/B 复用池 5613ms vs 无池 10176ms（**1.81×**）。
+- 注：offscreen 绝对耗时含事件循环、绘制、QTimer 与 Fluent 事件，波动较大（57.4~135.4ms），不作为用户态帧耗时的唯一指标；即时（非懒加载）页路径零改动并已单独回归。offscreen 启动 15s 无错误日志、`config.json` md5 未变；全局遗留符号 0、分层依赖违规 0；本轮未执行任何打包命令。临时脚本 5 个已清理。
+
+### 统一：详情页全部值单行显示 + 溢出自动跑马灯（2026-11-19）
+
+- 需求：详细信息全部单行显示，超过（溢出右列宽）的单行用跑马灯完整展示信息。
+- 改动（`app/components/file_info_dialog.py`）：`_add_rows` 把原 12 行 `BodyLabel`（wordWrap 换行 + 可选中复制）统一改为 `MarqueeLabel(bold=False, auto=True)`；删除 `_MARQUEE_KEYS` 分支与 `BodyLabel` / `QSizePolicy` 导入；14 行值统一走 `AlignVCenter` 拉伸填满右列（跑马灯需拉伸才能检测溢出）。
+- 复用 `MarqueeLabel(auto=True)` 固有语义：`_need_scroll = 文本宽 > 控件宽`，溢出才自动滚动、不溢出静态单行且定时器零开销；组件本身**零改动**，列表卡片仍「悬停才滚」不受影响。
+- 路径行特殊交互完整保留（手型光标 / `setTextColor` 强调色 / Fluent `ToolTipFilter` / 点击定位），其余 13 行普通态（不染色、不可点击、无提示）。
+- **配套修复 · 统一行高**：实测 Fluent `BodyLabel` 一旦被 `setStyleSheet()`（哪怕原样重设；7 种颜色写法全测过）`sizeHint().height()` 由 14 突变为 30，与写法无关 —— 路径行因染强调色会比其他 13 行高一截。在 `_add_rows` 给所有值行 `setFixedHeight(fontMetrics().height() + 4)`（实测 16px），14 行严格等高；不改组件、不影响卡片、不影响 2:3 列宽与水平滚动。
+- 取舍：跑马灯子 label 对鼠标透明（`WA_TransparentForMouseEvents`），统一后各值行不再支持鼠标拖选复制（此前艺术家行已如此）；「完整显示信息」由自动滚动达成。
+- 验证（仅源码，未打包）：py_compile 过；8 组断言全过 —— 14 行均为跑马灯 / 全部拉伸填满 186px 右列且等高 16px / 2:3 = 0.667 / 7 长值行自动滚且不换行 / 逐行独立判定（13 静态 + 修改时间自动滚）/ 路径交互保留其余普通 / 同框长短混排互不干扰 / 真实事件循环 400ms 推进 20.5px ≈ 55px/s；渲染截图 + offscreen 启动 15s 无错误。临时脚本与截图已清理。
+
+### 调整：详情页键值表列宽占比 左 2/5 : 右 3/5（2026-11-19）
+
+- 需求：左侧列占比五分之二、右侧列五分之三（同时兑现上一轮「左列往右来点」：左列变宽后右对齐键名自然右移）。
+- 方案（`app/components/file_info_dialog.py`）：`setColumnStretch(0, 2)` + `setColumnStretch(1, 3)`，删除原 `setColumnStretch(1, 1)`。
+- **关键坑（实测）**：`QGridLayout` 的 stretch 只分配「扣除每列最小宽度后的剩余空间」，而每列下限取该列所有 widget 的 `minimumSizeHint` 最大值。长文件名/标题等 `BodyLabel`（`Preferred` 策略，minW 可达 196px）会撑大右列下限，导致长元数据场景比例漂移为 114:196=0.582（短元数据恰好 124:186=0.667）。修复：给普通值 `BodyLabel` 设水平 `QSizePolicy.Ignored`（与跑马灯组件同策略），其 sizeHint 不再参与列下限计算，stretch 遂精确按 2:3 分配全部空间；wordWrap 仍在列宽内自动换行，且加 `AlignLeft` 也不会溢出列边界（已断言）。
+- 验证：py_compile 通过；验证脚本全过（短/长元数据 × 900/1400 两种窗口宽度，四种组合均 124:186=0.667；键名右缘 72→148；右列收窄到 186 后路径/艺术家跑马灯仍填满并自动滚动；14 行无越界重叠；短艺术家静态不滚；值 label 宽度均 ≤ 列宽）；渲染截图确认；offscreen 启动 15s 无错误。未打包。
+
+### 调整：艺术家值过长时自动跑马灯、不溢出则静态单行（2026-11-19）
+
+- 需求：详情页「艺术家」值过长被覆盖/换行时自动跑马灯，不过长则不使用跑马灯。
+- 方案（`app/components/file_info_dialog.py`）：新增类级常量 `_MARQUEE_KEYS = ("完整路径", "艺术家")` 统一判定；艺术家行值改 `MarqueeLabel(bold=False, auto=True)`——组件固有语义即「溢出才滚、不溢出静态单行零开销」，天然满足需求；`addWidget` 走 `AlignVCenter` 拉伸填满列宽（与路径一致，否则无法检测溢出）。艺术家保持默认样式：无手型光标、不染色、无点击与 ToolTip（区别于路径行）。其余 12 行仍 `BodyLabel` 可选中复制，范围未扩大。
+- 验证：py_compile 通过；6 组断言全过（长艺术家 882>262 自动滚动 / 短艺术家 42<262 静态不滚且定时器不空转 / 其余行仍 BodyLabel / 路径行回归 / 默认样式 / 同框长路径滚短艺术家不滚互不干扰）；渲染截图确认艺术家长值单行无换行无重叠；offscreen 启动 15s 无错误。未打包。
+- 注：验证脚本两处调试修正（局部 host 被 GC 连带销毁对话框子树须保活；ArrowCursor 断言值写错）均为测试脚本问题，非功能缺陷。
+
+### 调整：详情页键值表左右对齐 + 宽度收窄（2026-11-19）
+
+- 需求：文件信息详情页左列右对齐、右列左对齐，整体宽度窄一点。
+- 方案（`app/components/file_info_dialog.py`）：键 `CaptionLabel` 与值 `BodyLabel` 的 `setAlignment` / `addWidget` 对齐标志改为 `AlignRight|AlignVCenter`（左列）与 `AlignLeft|AlignVCenter`（右列），值贴近键列起排、扫读更顺；路径跑马灯保持 `AlignVCenter` 拉伸（其内部文本本就左对齐，与右列一致，不能加水平对齐标志否则无法溢出滚动）。`widget` 宽度 460–560 → **380–430**（实测 380），去掉居中留白。
+- 验证：py_compile 通过；6 组断言全过（宽度 380 / 14 键右对齐 / 值左缘对齐 / 两列间距 21px 无重叠 / 路径收窄后仍自动滚动 / 值行有效布局）；渲染截图确认对齐与紧凑度；offscreen 启动 15s 无错误。未打包。
+
+### 完善：完整路径跑马灯改为自动滚动 + Fluent 风格悬停提示（2026-11-19）
+
+- 需求：路径跑马灯需自动滚动（不再要求鼠标悬停）；路径的悬停提示改用 Fluent 组件，不用系统原生黑框。
+- 方案（`marquee_label.py`）：新增 `auto` 开关，默认 `False` —— 列表卡片仍「悬停才滚、静止零开销」，**不破坏上一轮的性能优化**（几百张卡不会常驻定时器）；`auto=True` 时溢出即自动滚动、跳过起始延迟保留起步加速；补 `showEvent` 与既有 `hideEvent` 配对，重新显示可恢复滚动。
+- 方案（`file_info_dialog.py`）：路径传 `auto=True`；原生 `setToolTip` 换成项目统一的 Fluent 提示范式 `ToolTipFilter(showDelay=300, position=BOTTOM)` + `setToolTipDuration(-1)`，富文本 `<b>完整路径</b>...`，过滤器由 `self._path_tip` 持有防 GC；`_PathClickFilter` 简化为只处理点击定位，hover 一律放行，保证与 `ToolTipFilter` 事件过滤器链互不干扰。
+- 验证：py_compile 通过；8 组断言全过（卡片零开销/自动启动/offset 推进/短文本不空转/hide-show 恢复/两过滤器共存/对话框装配/渲染激活后自动滚动）；真实事件循环 400ms 推进 21.4px（≈55px/s，与既定速度一致）；offscreen 启动 15s 无错误；渲染截图确认路径单行无重叠。未打包。
+
+### 修复：文件信息对话框「完整路径」改为单行跑马灯（2026-11-19）
+
+- 问题：路径过长时 `BodyLabel` 自动换行，与其他字段行重叠遮挡。
+- 方案：路径值改用 `MarqueeLabel`（单行、悬停首尾相连无缝滚动），不再换行。
+  - `marquee_label.py`：新增 `bold` 参数（默认 True 兼容卡片），对话框传 False 用普通体；新增 `setTextColor()` 直接作用每份文本（Fluent 全局 QSS 会覆盖父控件 stylesheet），第二份文本继承颜色。
+  - `file_info_dialog.py`：`_PathClickFilter` 扩展为 hover 启停 + 左键定位；路径行去掉水平居中改 `AlignVCenter`，让跑马灯拉伸填满列宽（Ignored 策略）才能检测溢出并滚动；颜色刷新改走 `MarqueeLabel.setTextColor()`。
+  - 提示语更新为「过长可悬停滚动 · 点击打开文件所在位置」；其余字段行、右键菜单、主题切换均不受影响。
+  - 验证：py_compile 通过；6 组断言（字体策略/颜色继承/单行/hover 启停/过滤器/对话框装配）全过；渲染激活后路径列宽 442px、need_scroll=True；offscreen 启动 15s 无错误。
+
+### 优化：媒体探测性能——封面 + 标签合并为一次 ffmpeg（2026-11-19）
+
+- **需求**：逐代码读取后提升性能 / 优化算法。
+- **根因（逐行定位 + 实测）**：已解密页对同一文件起**两次** ffmpeg 进程——`_CoverRunnable`→`extract_cover_bytes`（封面）与 `_TagRunnable`→`probe_audio_info`（标签）各自读一遍。实测两次调用 2.972s/20 轮，一次调用 1.546s/20 轮（**约 1.92×**）。
+- **方案（零新增依赖）**：
+  - `app/common/media_info.py`：抽出 `_parse_media_text()` / `_run_ffmpeg()` 复用；新增 `probe_media(ffmpeg, path)`——**一次** ffmpeg（`-map 0:v:0? … pipe:1`）stdout 取封面 PNG（签名校验）、stderr 解析完整元数据（标签在 stderr 出现两次，正则取首次；不靠 returncode 判成败，无封面时非 0 属正常）。`probe_audio_info()` 保留（对话框用），改为复用解析函数；新增 `_PNG_SIGNATURE`。
+  - `app/common/cover_loader.py`：`CoverCache.MISS` 类级别名（= 模块哨兵 `CACHE_MISS`）。
+  - `app/view/decrypted_interface.py`：两个 runnable / 两个队列 / 两个信号 / 两个 pending 合并为一个 `_MediaRunnable` + `_media_results` + `mediaDone` + `_media_pending`；统一 `_ensure_media(item)`（封面懒加载与标签归类共用，按 item 去重——同文件只起一个进程，视口内文件的标签在提封面时顺便拿到）；`_on_media_done()` 一次回填封面 LRU + `_tags` + `_media_info`（完整 info）。新增 `_media_info` 缓存供 `_show_file_info()` 复用，命中免重复起进程。`_lazy_filter()` sort key 改为单次取标签值（原每元素调 2 次 `_tag_of`）。
+- **验证（仅源码，未打包）**：py_compile 全过；8 组单元断言全 PASS（probe_media 三场景、probe_audio_info 完整字段、CoverCache.MISS、同 item 去重只提交一次、一次回填三缓存、归类排序、info 缓存复用、runnable 四元组产出）；实测 1.92× 提速；offscreen 启动 15s 无错误、配置值与默认一致（config.json 被 gitignore）。未执行任何打包命令。
+- 注：`probe_media` 每次调用仍解析全套字段（对话框可能需要），归类只用 artist/album 但进程只起一次，解析开销相对进程启动可忽略；未合并封面 LRU 与标签缓存（前者有上限会淘汰、后者需全量，语义不同）。
+
+### 新增：已解密页分类「歌手名 / 专辑名」归类（2026-11-19）
+
+- **需求**：已解密页顶部分类下拉再加两项「歌手名」「专辑名」，匹配相应分类规则（用户选定：按歌手/专辑归类——同值相邻、无信息排末尾）。任务管理页零改变。
+- **方案**：零新增依赖，复用内置 ffmpeg 元数据探测 + 后台批量 + 缓存。
+  - `app/common/media_info.py`：新增 `guess_artist_from_name()`——无内嵌歌手标签时按文件名「歌名 - 歌手」回退解析（正则取最后一段分隔符，排除 `[]()` 等后缀噪声）；专辑名无法从文件名可靠推断，只依赖内嵌标签。
+  - `app/view/decrypted_interface.py`：下拉扩为「全部/已解密/已添加/歌手名/专辑名」（宽度 104→112）；新增 `_TagRunnable`（后台单文件探测，数据走 queue + 无参信号，沿用避坑模式）+ `_tags` 缓存（item 含 mtime，刷新后失效）+ `_tag_pending` 去重 + 120ms 防抖重排；`_lazy_filter()` 在标签分类下按 `(有值=0/无值=1, 值.casefold())` 稳定排序——同值相邻、无值末尾、组内保持原 mtime 倒序。切换分类 / 首次扫描完成均触发 `_ensure_tags()`。
+- **验证（仅源码，未打包）**：py_compile 全过；8 组单元断言全 PASS（文件名解析含多分隔符/噪声、下拉五项、歌手与专辑归类同值相邻+无值末尾+组内倒序、大小写不敏感、全部回归原顺序、回填触发防抖重排、非归类不无谓重排）；offscreen 启动 15s 无错误日志、配置未改动。
+- 注：归类按 Unicode 码点升序（中文非拼音序，仅保证同值相邻）；千级文件首次切分类时后台逐个探测（几十 ms/个），列表随回填渐进归类。
+
+### 调整：跑马灯滚动速度放慢（2026-11-19）
+
+- **需求**：跑马灯效果慢一点。
+- **改动**：`app/components/marquee_label.py` 的 `MarqueeLabel._SPEED` 由 85 → 55 像素/秒（约 65%），长文件名滚动更从容；起始延迟 `_START_DELAY`、起步加速 `_RAMP`、帧间隔 `_INTERVAL` 均不变，保留启动跟手性。滚动为时间驱动，帧率波动不影响观感速度。
+- **验证（仅源码，未打包）**：py_compile 通过；单帧断言 55px/s 下 16ms 位移 0.88px（原 85px/s 为 1.36px），其余时序参数不变。
+
+### 完善：信息对话框 label 居中 + 路径点击定位文件（2026-11-19）
+
+- **需求**：文件信息对话框 label 居中；完整路径可点击，点击打开所在位置。
+- **改动**：
+  - `app/components/file_info_dialog.py`：标题 + 键值表所有 label（`CaptionLabel`/`BodyLabel`）改为 `Qt.AlignCenter`；完整路径值做成强调色手型可点击标签，`_PathClickFilter`（QObject 事件过滤器）捕获左键 → `_open_location()`；路径色随 `themeChanged`/`themeColorChanged` 刷新；失败 toast 提示。
+  - `app/common/utils.py`：新增 `open_file_location(path)`——Windows `explorer /select,"path"` 定位并选中，macOS `open -R`，Linux `xdg-open` 打开目录；路径不存在/OSError 返回 False。
+- **关键坑**：① Fluent 标签（BodyLabel）的 `__init__` 是 `singledispatchmethod`，子类化会触发重载递归崩溃 → 改用事件过滤器，不继承；② 过滤器须由 self 持有，否则被 GC 回收静默失效；③ 过滤器回调的 `path` 闭包须从 `_add_rows(path)` 参数传入（用 `__init__` 局部变量会 NameError）。
+- **验证（仅源码，未打包）**：py_compile 全过；单元断言全 PASS（标题+28 label 全居中、路径手型/可点击、点击触发定位、主题色刷新、失败 toast、explorer 命令正确、不存在路径/OSError 返回 False）；端到端右键弹窗→点击路径→定位链路通过；offscreen 启动 12s 无错误、配置未改。
+
+### 新增：已解密页右键「查看信息」（2026-11-19）
+
+- **需求**：已解密列表右键增加查看信息功能，点击弹出对话框显示详细文件信息；适配主题切换。任务管理页零改变。
+- **方案**：零新增依赖，复用内置 ffmpeg 探测元数据 + Fluent 对话框。
+  - `app/common/media_info.py`（新）：`probe_audio_info()` 调用 `ffmpeg -i` 解析 stderr，提取时长/整体码率/编码/采样率/声道（中文化）/标题/艺术家/专辑；探测本质是读文件头、非 3s 超时即静默返回空字典；失败（文件不存在/损坏/ffmpeg 缺失）全静默，不打断调用方；遵循分层不依赖 UI。
+  - `app/components/file_info_dialog.py`（新）：`FileInfoDialog(MessageBoxBase)` 键值表展示 14 字段（文件名/完整路径/大小/修改时间/来源/格式 + 音频参数 + 标签），值可选中复制、长路径自动换行；全 Fluent 控件随主题/强调色自动切换；仅保留「关闭」按钮。
+  - `app/view/decrypted_interface.py`：右键菜单新增「查看信息」（`FluentIcon.INFO`，置于播放/删除之前）→ `_show_file_info()` 收集预取 stat + 来源缓存 + ffmpeg 元数据，弹出对话框；探测失败对缺失字段显示「—」。
+- **验证（仅源码，未打包）**：py_compile 全过；单元断言——4 种格式（mp3/flac/m4a/wav）元数据解析准确含中文标签、无元数据/损坏/不存在/无 ffmpeg 路径全静默、对话框 14 字段双主题完整、空数据显示占位符、右键菜单三项顺序正确、点击槽端到端字段齐全；offscreen 启动 12s 无错误、配置未改动。
+- 注：音频探测为用户主动点击时的同步单文件调用（几十毫秒），不进入列表主流程；ogg/ape/wv 等冷门格式的标签解析未逐一实测，缺失字段回退「—」。
+
+### 新增：已解密列表内嵌专辑封面（仅已解密页）（2026-11-19）
+
+- **需求**：已解密页卡片最左侧显示文件内嵌专辑封面缩略图；任务管理页零改变；适配主题 / 强调色切换。
+- **方案**：零新增依赖，复用内置 ffmpeg + PySide6 QImage（可行性分析见 `docs/已解密列表-内嵌专辑封面可行性分析.md`）。
+  - `app/common/cover_loader.py`（新）：`extract_cover_bytes()`（ffmpeg `-map 0:v:0?` 提取首张内嵌图为 PNG 字节流，无封面/损坏/超时静默返回 None，Windows 抑制黑框）+ 线程安全 LRU `CoverCache`（键 `(路径,mtime)`，`None` 亦缓存避免反复起进程）。
+  - `app/components/task_card.py`：`cover=False` 可选参数——仅已解密页传 True 才创建 44×44 圆角封面位；任务页默认不创建，布局零改变。无封面显示主题强调色淡底 + 音符占位图；`set_cover()` / `refresh_cover_placeholder()`（后者只重绘仍为占位图的卡片，不覆盖真实封面）。
+  - `app/view/decrypted_interface.py`：`_CoverRunnable`（后台提取 + 无参信号 + queue，避开跨线程封送坑）；`_make_card(cover=True)` → `_apply_cover()`（命中缓存直接设图，未命中提交后台、按 item 去重）；`_on_cover_done()` 按 `_card_cache` + `_lazy_item` 一致性回填、过时结果丢弃；`themeChanged`/`themeColorChanged` → 重绘占位图。
+- **验证（仅源码，未打包）**：py_compile 全过；单元断言 6 组全 PASS（端到端提取/无封面静默、任务页零改变、真实封面主题切换保护、占位图随强调色重绘、缓存命中、异步回填+过时丢弃）；端到端实测带封面 mp3 提取 PNG 成功；offscreen 启动 12s 无错误、配置未改动。
+- 注：ogg/ape/wv 等冷门格式封面未实测，回退占位图。
+
+### 修复：任务列表显示顺序——未解密在上、已解密在下（2026-11-19）
+
+- **现象**：任务管理页文件顺序杂乱，已解密与未解密混杂，不符合「未解密在上、已解密在下」的期望。
+- **根因**：任务页已有 `_sort_cards()`（按 `pending→running→failed→skipped→success` 排序）但仅在 `_relayout()` 时调用。① 渐进填充路径 `_fill_next_chunk()` 按目录扫描顺序逐张补格，不经 `_sort_cards()`，首次加载 / 刷新重建后顺序即为扫描顺序；② 转换完成逐文件只更新卡片状态、不重排，已解密卡片停留在原位。
+- **修复**：
+  - `app/components/grid_card_container.py`：新增 `_sort_items(items)` 钩子（默认原样），在 `_replace_cards()` 重建入口统一调用，使渐进 / 非渐进 / 懒加载三条路径都按预排序顺序建卡；稳定排序保持组内相对次序。
+  - `app/view/task_interface.py`：新增 `_item_status(path)`（已解密优先于在途快照，与建卡判定同源）与 `_sort_items()` 覆写（按状态优先级预判排序）；连接 `conversion_finished` → `_relayout()`，整批转换结束后一次性把已解密卡片沉底——转换过程中仍逐文件只更新状态，避免整页跳动。
+  - 已解密页未覆写钩子，保持按修改时间倒序不变。
+- **验证（仅源码，未打包）**：py_compile 通过；单元断言 5 组全 PASS（状态判定 / 稳定预排 / 渐进重建首次扫描顺序 / 转换完成沉底且逐文件阶段不重排 / 已解密页顺序不变）；offscreen 启动 10s 无错误、配置未改动。
+
+### 修复：深色模式下列表浅底白字 + 外观设置组件统一（2026-11-19）
+
+- **现象（用户截图报告）**：深色模式下「已解密」页文件卡片呈浅灰白底 + 白色文字，几乎看不清；同时外观设置用了与转换设置不同的组件（展开式单选 vs 下拉框）。
+- **根因（实测定位）**：`GridCardContainer` 的 `scrollContent`（`QWidget`）被 `setWidgetResizable(True)`/`setWidget()` 置为 `autoFillBackground=True`，其 palette 的 Window 色不随主题切换（深色下仍是 `#efefef`）；`CardWidget` 背景是半透明白（深色 alpha=13）叠在该浅色底板上 → 浅底，`StrongBodyLabel` 文字却是 dark 版白色 → 白字。诊断截图与用户截图完全一致。
+- **修复**：
+  - `app/components/grid_card_container.py`：在 `scrollArea.setWidget(self.scrollContent)` **之后** `setAutoFillBackground(False)`（顺序关键：setWidget 会重置为 True），让内容区透明、透出 viewport 深色底。任务页 / 已解密页两页共用基类同时受益。
+  - `app/view/setting_interface.py`：主题卡片由 `OptionsSettingCard` 改为 `ComboBoxSettingCard`（与转换设置一致），仍绑定枚举型 `qconfig.themeMode`；`comboBox.currentIndexChanged` → `_on_theme_changed(index)` 用 `itemData(index)`（Theme 枚举）调 `setTheme` 刷新全局 QSS。
+- **验证（仅源码，未打包）**：py_compile 通过；单元断言全 PASS——两页内容区 autoFill=False、下拉三项文本正确、卡片类型为 ComboBoxSettingCard、三项切换写对 themeMode 且各触发一次 `themeChangedFinished`（QSS 刷新）、深色卡片背景 alpha=13；修复前/后深色截图对比确认「浅底白字」→「深底白字」；offscreen 启动 10s 无错误、配置未改动。
+
+### 完善：跟随系统实时换肤（2026-11-19）
+
+- **需求**：主题选「跟随系统」时，系统深浅色在运行中切换应实时生效（上一轮实现只在启动/手动切换时读取一次）。
+- **依据**：QFluentWidgets 官方主题指南（`/pages/theme` → Follow system theme）+ 库源码 `theme_listener.py`。
+- **方案**（`app/view/main_window.py`）：
+  - `init_theme_listener()` 创建并 `start()` `SystemThemeListener`；`systemThemeChanged` → `_on_system_theme_changed` → `setTheme(Theme.AUTO)`。
+  - **关键坑**：官方 listener 在系统主题变化时只改 `qconfig.theme` 并发 `themeChanged`/`systemThemeChanged`，**不刷新全局 QSS**；必须接 `setTheme()` 由其 `updateStyleSheet()` 才能全体换肤。
+  - listener 内部自带门控——仅 `themeMode==AUTO` 时响应，手动浅/深色下系统切换不干扰（已实测确认）。
+  - 生命周期：Windows 上 `darkdetect.listener` 为无限阻塞循环，只能 `terminate()`；抽出幂等 `_stop_theme_listener()`，`closeEvent` 与 `on_exit`（aboutToQuit）双路径调用，避免 QThread 运行中被销毁。
+- **验证（仅源码，未打包）**：py_compile 通过；单元级 monkeypatch `darkdetect.theme` 全 PASS——LIGHT/DARK 模式门控不响应、AUTO 下解析为 DARK 且 `themeChangedFinished` 触发（确认全局刷新）、重复停止幂等；offscreen 启动 12s 无 QThread/异常日志，config.json 未改动。
+
+### 新增：主题切换（跟随系统 / 浅色 / 深色）（2026-11-19）
+
+- **需求**：设置页增加「外观设置」分组，提供三种主题模式——跟随系统、浅色模式、深色模式。
+- **方案**：复用 QFluentWidgets 内置主题系统，不自建主题状态。
+  - `app/common/config.py`：`qconfig.load` 后把 `qconfig.themeMode` 的选项顺序由库默认 `LIGHT/DARK/AUTO` 重排为 `AUTO/LIGHT/DARK`（只改 `validator.options` 顺序，`Theme` 枚举值不变），使界面按「跟随系统 / 浅色 / 深色」呈现。
+  - `app/view/setting_interface.py`：新增 `OptionsSettingCard` 绑定 `qconfig.themeMode`（texts 与重排后 options 一一对应）；连接 `optionChanged` → `setTheme(qconfig.get(item))`。
+  - **关键点**：`OptionsSettingCard` 点击仅经 `qconfig.set` 写入配置并发出 `themeChanged`，**不会**刷新全局 QSS；必须显式调用 `setTheme()`（内部 `updateStyleSheet`）才能让所有 Fluent 控件换肤。
+  - 持久化沿用库 `themeMode`（已存在于 config.json 的 `QFluentWidgets.ThemeMode`），`setTheme` 写盘；「跟随系统」在 `qconfig.theme` setter 内由 `darkdetect` 解析为实际浅/深。
+- **验证（仅源码，未打包）**：`py_compile` 4 个相关文件通过；offscreen 启动 `main.py` 持续 12s 无异常、config.json 未被启动流程改动；单元级断言全 PASS——选项顺序 `[AUTO,LIGHT,DARK]`、按钮文本 `跟随系统/浅色/深色`、逐项点击后 `themeMode`/`qconfig.theme` 正确（AUTO 解析为 LIGHT）、DARK↔AUTO 可来回切换；验证后 config.json 已还原。
+
 ### 修复：清空列表后刷新列表不显示文件（2026-11-17）
 
 - **现象（用户 2026-11-17 报告）**：点「清空列表」→ 点「刷新列表」看不到文件；「删除完成」后再刷新同样看不到。

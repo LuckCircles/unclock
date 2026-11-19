@@ -9,6 +9,7 @@ from qfluentwidgets import (
     OptionsConfigItem,
     OptionsValidator,
     QConfig,
+    Theme,
     qconfig,
 )
 
@@ -88,6 +89,11 @@ _DEFAULT_QMPC = str(PROJECT_ROOT / "tools" / "qmpc-mmkv-cli.exe")
 # 供下方「首次运行生成」判断
 _config_existed = Path(CONFIG_PATH).exists()
 qconfig.load(CONFIG_PATH, cfg)
+
+# 主题切换选项顺序：跟随系统 / 浅色 / 深色
+# 库默认顺序为 LIGHT/DARK/AUTO，这里重排为 AUTO/LIGHT/DARK 以匹配界面呈现；
+# OptionsSettingCard 依据 themeMode.options 顺序配对文本，值本身是 Theme 枚举不受影响。
+qconfig.themeMode.validator.options = [Theme.AUTO, Theme.LIGHT, Theme.DARK]
 
 # 自动检测：仅在「尚未配置」或「已配置路径失效」时回退到内置工具。
 # 用户显式设置且当前有效的外部路径必须保留——此前无条件覆盖会让设置页
