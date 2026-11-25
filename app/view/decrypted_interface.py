@@ -4,8 +4,12 @@
 按来源打标签：由本工具从加密输入解密产生 → 「已解密」（绿）；输出目录原本就有、
 不对应任何加密输入 → 「已添加」（黄）。只扫描常见音乐文件类型。
 支持：顶部分类下拉框（全部/已解密/已添加/歌手名/专辑名）与搜索栏过滤、
-右键卡片播放 / 删除文件（删除带确认）、刷新 / 打开目录。「歌手名」「专辑名」
-为归类排序（同值相邻、无信息排末尾），标签经内置 ffmpeg 后台批量探测并缓存。
+右键卡片查看信息 / 播放音乐 / 删除文件（删除带确认）、刷新 / 打开目录。
+「保存封面」入口在**查看信息对话框底部右侧**（2026-11-23 起右键菜单不再
+提供）：一键导出到**音乐文件同目录**，不弹保存对话框；目标固定为同目录
+同名 ``.png``，重复保存直接覆盖、不加序号。保存成功走 ``toast_requested``
+的默认成功提示（无「查看」按钮）。「歌手名」「专辑名」为归类排序（同值
+相邻、无信息排末尾），标签经内置 ffmpeg 后台批量探测并缓存。
 """
 
 from collections import deque
@@ -14,6 +18,7 @@ import queue
 
 from PySide6.QtCore import Qt, QRunnable, QThreadPool, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
+from PySide6.QtWidgets import QApplication
 from qfluentwidgets import (
     Action,
     CaptionLabel,
@@ -29,12 +34,13 @@ from qfluentwidgets import (
 )
 
 from ..common.config import cfg
-from ..common.cover_loader import CoverCache
+from ..common.cover_loader import CoverCache, extract_cover_bytes
 from ..common.decrypt_scanner import build_input_basenames, output_source_label
 from ..common.logger import logger
 from ..common.media_info import guess_artist_from_name, probe_audio_info, probe_media
 from ..common.signal_bus import signalBus
 from ..common.utils import is_music_file
+from ..components.cover_thumb_cache import CoverThumbCache
 from ..components.file_info_dialog import FileInfoDialog
 from ..components.grid_card_container import GridCardContainer
 from ..components.task_card import TaskCard
@@ -46,6 +52,21 @@ _SEARCH_DEBOUNCE_MS = 120
 # 当前屏幕的封面排在几千个文件之后），改由主线程按「当前视口可见优先」
 # 的双队列按需喂入，见 _ensure_media / _pump_media。
 _MEDIA_MAX_THREADS = 2
+# 页面切换动画期间暂缓提交媒体探测（毫秒）：动画约 300ms，主线程正在做
+# 整窗重绘，此时起 ffmpeg 子进程会争 CPU/IO（实测最慢帧 147ms → 59ms）。
+# 队列只攒不丢，动画收尾后按「可见优先」恢复喂入，封面晚约 0.2s 出现。
+_MEDIA_RESUME_MS = 240
+
+
+def _cover_path(music_path: str) -> str:
+    """封面导出目标：音乐文件同目录、同名 ``.png``（纯函数）。
+
+    固定文件名，**不加 ``_2/_3`` 序号**；重复保存由 ``_save_cover`` 以
+    ``"wb"`` 直接覆盖同名文件（用户 2026-11-23 明确圈定）。这里不做
+    ``os.path.exists`` 预检：覆盖写本身就是一次写入尝试，先查再写只会引入
+    TOCTOU 竞态，能否写入交给 ``open()`` 的 OSError 分支统一反馈。
+    """
+    return os.path.splitext(music_path)[0] + ".png"
 
 
 def _scan_output(out_dir: str, input_dir: str):
@@ -183,12 +204,19 @@ class DecryptedInterface(GridCardContainer):
         self._sources = {}             # 条目 → 来源标签缓存（纯字符串计算，懒求解）
         self._refresh_mode = False     # 本次扫描是否由「刷新」触发（决定呈现契约）
         # 媒体探测统一状态：一次 ffmpeg 同时产出封面 + 标签，共用结果队列/在途集合
-        self._cover_cache = CoverCache()   # 封面字节 LRU（按 (路径,mtime) 失效）
+        self._cover_cache = CoverCache()   # 原始 PNG 字节 LRU（按 (路径,mtime) 失效）
+        # 已显示封面的 44×44 圆角缩略图 LRU：命中即直接 setPixmap，跳过解码裁剪。
+        # 两级缓存分工：字节缓存挡住重复 ffmpeg，缩略图缓存挡住重复 QImage 解码。
+        self._cover_thumbs = CoverThumbCache()
+        # 「标签已探测、但封面缓存被淘汰」而需要重新取封面的条目集合：
+        # _ensure_media 默认按 _tags 判重，这个集合让封面重载任务不被误判为已完成。
+        self._cover_recheck = set()
         self._tags = {}                    # item → {'artist','album'}（含空串，避免重复探测）
         self._media_info = {}              # item → 完整 info（供「查看信息」复用，免重复起进程）
         self._media_results = queue.SimpleQueue()
         self._media_pool = QThreadPool(self)  # 专用：密集探测不占满全局线程
         self._media_pool.setMaxThreadCount(_MEDIA_MAX_THREADS)
+        self._media_paused = False    # 切换动画 / 页面隐藏期间暂停提交 ffmpeg
         # 探测调度：两条队列 + 三组状态，让「当前屏幕可见」的封面不必等
         # 整份列表按序跑完。一次性 start() 千级文件时，可见项在 FIFO 队列
         # 里永远排在队尾，屏幕上会长时间停留在占位图。
@@ -264,10 +292,28 @@ class DecryptedInterface(GridCardContainer):
 
     def showEvent(self, e):
         super().showEvent(e)
+        self._pause_media_during_transition()
         if not self._filled_once:
             self._filled_once = True
             self._refresh_mode = False
             QTimer.singleShot(0, self._start_scan)
+
+    def hideEvent(self, e):
+        # 页面看不见了就不再喂新任务；在途 ffmpeg 跑完结果仍会入队，
+        # 下次显示时由 showEvent 统一恢复，不丢任务也不做无用 IO。
+        self._media_paused = True
+        super().hideEvent(e)
+
+    def _pause_media_during_transition(self):
+        """切入本页时暂缓媒体探测，等切换动画收尾再提交 ffmpeg。"""
+        self._media_paused = True
+        QTimer.singleShot(_MEDIA_RESUME_MS, self._resume_media)
+
+    def _resume_media(self):
+        if not self.isVisible():
+            return  # 期间又切走了：保持 paused，等下一次 showEvent 恢复
+        self._media_paused = False
+        self._pump_media()
 
     # ------------------------------------------------------------ 基类钩子
     def _make_card(self, item) -> TaskCard:
@@ -286,7 +332,7 @@ class DecryptedInterface(GridCardContainer):
             cover=True,
         )
         card._source = label
-        # 右键菜单：播放 / 删除
+        # 右键菜单：查看信息 / 播放 / 删除（保存封面已移到信息对话框内）
         card.setContextMenuPolicy(Qt.CustomContextMenu)
         card.customContextMenuRequested.connect(
             lambda pos, c=card: self._show_card_menu(c, pos)
@@ -322,20 +368,39 @@ class DecryptedInterface(GridCardContainer):
         card.nameLabel.setText(os.path.basename(path))
         card.update_meta(size, mtime)
         card.set_badge(label, "success" if label == "已解密" else "warning")
-        card.set_cover(None)                # 先清占位图，避免残留上一个封面
+        # 不再无条件清占位图：缩略图缓存命中时 _apply_cover 会直接贴真实封面，
+        # 中间那次占位图重绘纯属浪费（40 张约 18ms）。确实未命中时由
+        # _apply_cover 清掉上一文件残留的封面，语义不变。
         self._apply_cover(item, card)
         return card
 
     # ------------------------------------------------------------ 媒体探测（封面 + 标签一次完成）
     def _apply_cover(self, item, card: TaskCard):
-        """封面命中缓存立即设图；未命中则统一登记媒体探测（顺便拿标签）。"""
-        cached = self._cover_cache.get(item[0], item[2])
-        if cached is not CoverCache.MISS:
-            card.set_cover(cached)   # None 也走占位图
+        """三级缓存：缩略图 → 字节 → ffmpeg，已显示过的封面零解码「秒加载」。
+
+        1) 44×44 缩略图命中：直接 setPixmap，实测 40 张仅 0.17ms；
+        2) 原始字节命中：解码裁剪一次（真实封面约 16ms），结果写回缩略图缓存；
+        3) 两级都未命中：清掉复用卡片上的旧封面，登记 ffmpeg 探测（约 254ms）。
+        """
+        path, _size, mtime = item
+        thumb = self._cover_thumbs.get(path, mtime)
+        if thumb is not CoverThumbCache.MISS:
+            card.set_cover_pixmap(thumb)   # None 表示确认无封面，走占位图
             return
+        cached = self._cover_cache.get(path, mtime)
+        if cached is not CoverCache.MISS:
+            pixmap = card.set_cover(cached)   # 唯一一次解码，None 也走占位图
+            self._cover_thumbs.put(path, mtime, pixmap)
+            return
+        # 卡片可能刚被复用，左侧位还留着上一首歌的封面 → 清成占位图。
+        # 新建卡片本来就是占位图，跳过这次重绘。
+        if card._has_real_cover:
+            card.set_cover_pixmap(None)
         # 物化范围含上下预载行，这里只按普通优先级登记；真正「屏幕上可见」
         # 的条目由 _on_visible_items / _prioritize_visible_items 提权。
-        self._ensure_media(item)
+        # for_cover=True：字节缓存若已被 LRU 淘汰，即使标签早已探测过也必须
+        # 重新登记，否则封面会永久停在占位图（旧实现按 _tags 判重的缺陷）。
+        self._ensure_media(item, for_cover=True)
 
     # ------------------------------------------------------------ 基类钩子：当前屏幕优先
     def _on_visible_items(self, items):
@@ -355,15 +420,26 @@ class DecryptedInterface(GridCardContainer):
         for it in reversed(self.visible_items()):
             self._ensure_media(it, priority=True, pump=False)
 
-    def _ensure_media(self, item, priority: bool = False, pump: bool = True):
+    def _ensure_media(self, item, priority: bool = False, pump: bool = True,
+                      for_cover: bool = False):
         """登记一次媒体探测（封面 + 标签共用一次 ffmpeg）。
 
         ``priority=True`` 表示「当前屏幕可见」：若该条目还在普通队列里排队，
         就复制一份插到 urgent 队首（原位置的条目出队时按 ``_media_queued``
         判重自动作废）；已在 ffmpeg 中运行的无法抢占，最多等一个任务完成
         （约几十毫秒）即可轮到。``pump=False`` 供批量登记时最后统一喂入。
+
+        ``for_cover=True`` 由 ``_apply_cover`` 在两级封面缓存都 MISS 时发起：
+        旧实现只按 ``_tags`` 判重，字节 LRU 一旦把封面挤掉，标签仍在就永远
+        不再登记探测，卡片永久停在占位图。这里改为把 item 记入
+        ``_cover_recheck``，使 ``_take_media_item`` 不把它当作已完成而丢弃；
+        归类用的全量补探测仍走 ``_tags`` 判重，避免对已有标签的文件重跑 ffmpeg。
         """
-        if item in self._tags or item in self._media_inflight:
+        if for_cover:
+            self._cover_recheck.add(item)
+        elif item in self._tags:
+            return
+        if item in self._media_inflight:
             return
         if priority:
             if item in self._media_urgent_set:
@@ -385,8 +461,11 @@ class DecryptedInterface(GridCardContainer):
 
         不让 QThreadPool 自己排长队：每次登记 / 每次结果回填都补喂一次，
         滚动、搜索、切分类后新出现的可见项就能立刻插队，而不是等前面
-        几百上千个 ffmpeg 跑完。
+        几百上千个 ffmpeg 跑完。切换动画 / 页面隐藏期间 ``_media_paused``
+        为真时只攒队列不提交，由 ``_resume_media`` 恢复。
         """
+        if self._media_paused:
+            return
         while len(self._media_inflight) < _MEDIA_MAX_THREADS:
             item = self._take_media_item()
             if item is None:
@@ -398,19 +477,23 @@ class DecryptedInterface(GridCardContainer):
             )
 
     def _take_media_item(self):
-        """取下一个待探测条目：先 urgent 后 normal，跳过已提权/回填的失效项。"""
+        """取下一个待探测条目：先 urgent 后 normal，跳过已提权/回填的失效项。
+
+        「已完成」判据是 ``_tags`` 命中，但 ``_cover_recheck`` 里的条目属于
+        「标签已有、封面缓存被淘汰」，必须放行重新探测，不能当失效项丢掉。
+        """
         while self._media_urgent:
             cand = self._media_urgent.popleft()
             self._media_urgent_set.discard(cand)
             if (cand in self._media_queued
                     and cand not in self._media_inflight
-                    and cand not in self._tags):
+                    and (cand not in self._tags or cand in self._cover_recheck)):
                 return cand
         while self._media_normal:
             cand = self._media_normal.popleft()
             if (cand in self._media_queued
                     and cand not in self._media_inflight
-                    and cand not in self._tags):
+                    and (cand not in self._tags or cand in self._cover_recheck)):
                 return cand
         return None
 
@@ -432,6 +515,7 @@ class DecryptedInterface(GridCardContainer):
         self._media_normal = deque(it for it in self._media_normal if it in valid)
         self._media_urgent_set.intersection_update(valid)
         self._media_queued.intersection_update(valid)
+        self._cover_recheck.intersection_update(valid)
 
     def _on_media_done(self):
         """取空结果队列：一次回填封面 LRU + 标签缓存 + 存活卡片；归类时防抖重排。"""
@@ -443,14 +527,17 @@ class DecryptedInterface(GridCardContainer):
                 break
             got = True
             self._media_inflight.discard(item)
+            self._cover_recheck.discard(item)
             self._cover_cache.put(item[0], item[2], cover)
             self._tags[item] = tags
             self._media_info[item] = info
             card = self._card_cache.get(item)
             # 仅回填当前 item 对应的存活卡片：重建 / 移除后 item 不在缓存，
-            # 或 mtime 已变（新条目），旧封面不会被贴到错误文件上
+            # 或 mtime 已变（新条目），旧封面不会被贴到错误文件上。
+            # 首次显示就把裁剪结果存入缩略图缓存，之后滚动回来 / 切页回来
+            # 零解码直接贴；卡片已回收时只留字节缓存，物化时再解码一次。
             if card is not None and not self._is_card_stale(card, item):
-                card.set_cover(cover)
+                self._cover_thumbs.put(item[0], item[2], card.set_cover(cover))
         if got:
             # 有线程空出：立即按当前优先级补喂，可见项始终先出图
             self._pump_media()
@@ -673,7 +760,11 @@ class DecryptedInterface(GridCardContainer):
 
     # ------------------------------------------------------------ 右键菜单
     def _show_card_menu(self, card, pos):
-        """在卡片上弹右键菜单（查看信息 / 播放 / 删除）。"""
+        """在卡片上弹右键菜单（查看信息 / 播放音乐 / 删除文件）。
+
+        2026-11-23 起「保存封面」不再放在这里：统一由「查看信息」对话框
+        底部右侧的按钮触发，入口与封面预览集中在一处。
+        """
         menu = RoundMenu(parent=self.window())
         info_act = Action(FluentIcon.INFO, "查看信息")
         info_act.triggered.connect(lambda: self._show_file_info(card))
@@ -687,11 +778,14 @@ class DecryptedInterface(GridCardContainer):
         menu.exec(card.mapToGlobal(pos))
 
     def _show_file_info(self, card):
-        """弹出只读对话框展示文件的详细元数据。
+        """弹出只读对话框：左侧内嵌封面 + 右侧详细元数据。
 
         基础信息（大小/修改时间）来自建卡时预取的 stat，来源取卡片缓存；
         音频参数由内置 ffmpeg 同步探测（用户主动点击、单文件、约几十毫秒）。
-        探测失败不阻断——对话框对缺失字段统一显示「—」。
+        封面走 ``_load_cover_bytes`` 与「保存封面」共用同一份字节缓存，命中
+        零 ffmpeg；标签与封面**两个缓存都空**时用 ``probe_media`` 一次调用
+        同时取回（否则会串行起两个 ffmpeg 进程），只缺一个则只补那一次。
+        无封面 / 探测失败都不阻断——对话框左侧回退占位图，缺失字段显示「—」。
         """
         path = card.file_path
         # 优先用已缓存的 stat，避免再访问磁盘；无缓存时回退 os.stat
@@ -707,19 +801,109 @@ class DecryptedInterface(GridCardContainer):
         source = getattr(card, "_source", None) or ""
         if not source and item:
             source = self._item_source(item)
-        # 优先复用后台探测时已缓存的完整 info（封面提取顺带解析），
-        # 未缓存时才同步探测一次——避免同一文件重复起 ffmpeg。
+        # 优先复用后台探测时已缓存的完整 info（封面提取顺带解析）。
+        # 两个缓存都 MISS 时一次 probe_media 同时拿标签 + 封面；只缺一个
+        # 才单独补那一次，绝不因为新增封面而让用户多等一个 ffmpeg 进程。
         media = self._media_info.get(item) if item else None
-        if media is None:
-            media = probe_audio_info(cfg.ffmpeg_path.value, path)
+        cover_cached = self._cover_cache.get(path, mtime)
+        if media is None and cover_cached is CoverCache.MISS:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                cover, media = probe_media(cfg.ffmpeg_path.value, path)
+            finally:
+                QApplication.restoreOverrideCursor()
+            self._cover_cache.put(path, mtime, cover)   # None 也是有效命中
+            if item is not None:
+                self._media_info[item] = media
+            # 顺带回填缩略图 + 让卡片立即出图（与 _load_cover_bytes 同语义）
+            if (cover and item is not None
+                    and self._card_cache.get(item) is card
+                    and not self._is_card_stale(card, item)):
+                self._cover_thumbs.put(path, mtime, card.set_cover(cover))
+        else:
+            if media is None:
+                media = probe_audio_info(cfg.ffmpeg_path.value, path)
+            cover = self._load_cover_bytes(path, mtime, card, item)
         dialog = FileInfoDialog(
-            path, size, mtime, source, media, self.window()
+            path, size, mtime, source, media, self.window(), cover=cover,
+            save_cover=lambda: self._save_cover(card),
         )
         dialog.exec()
 
     def _play_file(self, card):
         """用系统默认播放器打开音乐文件。"""
         QDesktopServices.openUrl(QUrl.fromLocalFile(card.file_path))
+
+    def _load_cover_bytes(self, path: str, mtime: float, card=None, item=None):
+        """取原始封面 PNG 字节：命中缓存零 ffmpeg，MISS 现场提取一次并回填。
+
+        「查看信息」与「保存封面」共用入口，保证两处拿到同一份数据，也避免
+        同一文件重复起 ffmpeg。``None`` 同样是有效缓存值（确认无封面）。
+        传入 ``card`` / ``item`` 时，MISS 提取成功后顺带把 44×44 缩略图写回
+        ``_cover_thumbs`` 并让当前卡片立即出图；卡片已被复用/回收则跳过。
+        """
+        cached = self._cover_cache.get(path, mtime)
+        if cached is not CoverCache.MISS:
+            return cached
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            cover = extract_cover_bytes(cfg.ffmpeg_path.value, path)
+        finally:
+            QApplication.restoreOverrideCursor()
+        self._cover_cache.put(path, mtime, cover)   # None 也缓存：确认无封面
+        if (cover and card is not None and item is not None
+                and self._card_cache.get(item) is card
+                and not self._is_card_stale(card, item)):
+            self._cover_thumbs.put(path, mtime, card.set_cover(cover))
+        return cover
+
+    def _save_cover(self, card):
+        """把音乐文件内嵌的专辑封面一键导出到**音乐文件同目录**。
+
+        不弹保存对话框：目标固定为同目录 ``<歌曲名>.png``，重复保存直接
+        覆盖同名文件、不生成 ``_2/_3`` 副本（用户 2026-11-23 指定）。成功
+        后发 ``signalBus.toast_requested(..., "success")``，由首页弹**默认
+        成功提示**（3s、无动作按钮）；日志仍记完整路径。
+
+        导出的是 ffmpeg 提取的**原始封面**，不是卡片上 44×44 的圆角缩略图。
+        优先复用后台探测已缓存的字节（显示过封面的卡片瞬时可用）；缓存未
+        命中才由 ``_load_cover_bytes`` 现场起一次 ffmpeg，并回填字节 + 缩略图
+        两级缓存，让卡片立刻出图、之后再次显示也秒加载。用户主动点击，
+        不占用后台探测队列。
+
+        返回 ``(ok, payload)``：成功时 payload 是导出图片的完整路径，失败时
+        是可直接展示的原因文案。2026-11-23 起唯一调用方是 ``FileInfoDialog``
+        的「保存封面」按钮——模态遮罩可能盖住首页浮层，因此失败反馈改由
+        对话框内的状态行显示，这里只记日志、不再另发 toast。
+        """
+        path = card.file_path
+        name = os.path.basename(path)
+        item = getattr(card, "_lazy_item", None)
+        if item and len(item) == 3:
+            mtime = item[2]
+        else:
+            try:
+                mtime = os.stat(path).st_mtime
+            except OSError:
+                mtime = 0.0
+
+        cover = self._load_cover_bytes(path, mtime, card, item)
+        if not cover:
+            return (False, f"未能提取「{name}」的内嵌封面（文件可能没有封面）")
+
+        # 一键落盘：同目录固定同名 .png，"wb" 直接覆盖，不加序号。
+        target = _cover_path(path)
+        try:
+            with open(target, "wb") as f:
+                f.write(cover)
+        except OSError as exc:
+            logger.error(f"保存封面失败: {target} ({exc})")
+            return (False, "保存封面失败，请检查路径权限或文件是否被占用。")
+        signalBus.log_emitted.emit(f"已保存封面: {target}", "success")
+        signalBus.toast_requested.emit(
+            f"已保存到音乐文件同目录: {os.path.basename(target)}", "success"
+        )
+        return (True, target)
 
     def _confirm_delete(self, card):
         path = card.file_path

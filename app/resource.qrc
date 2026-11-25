@@ -7,5 +7,11 @@
         <file alias="qmpc.png">resources/img/qmpc.png</file>
         <file alias="task_complete.png">resources/img/task_complete.png</file>
         <file alias="um.ico">resources/img/um.ico</file>
+        <file alias="QQMusic.png">resources/img/QQMusic.png</file>
+        <file alias="WangYiYun_Music.png">resources/img/WangYiYun_Music.png</file>
+        <file alias="KuGou_Music.png">resources/img/KuGou_Music.png</file>
+        <file alias="KuWo_Music.png">resources/img/KuWo_Music.png</file>
+        <file alias="XM_Music.png">resources/img/XM_Music.png</file>
+        <file alias="QiShui_Music.png">resources/img/QiShui_Music.png</file>
     </qresource>
 </RCC>

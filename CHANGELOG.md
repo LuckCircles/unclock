@@ -11,6 +11,244 @@
 > 「刷新 = 屏幕闪一次、卡片位置与内容均不变」的契约。新契约为
 > **「刷新后列表回到顶部，卡片从第一张开始自上而下逐张刷新」**。
 
+### 变更：详情界面改为参考图布局（顶部标题行 + 左大图 + 键左对齐）（2026-11-25）
+
+**需求**：用户提供详情界面参考图（手办资料卡），要求「按照这个布局，修改详情界面」。参考图特征：顶部一行左对齐「中文字段名：值」标题；左侧竖向大图占约 1/3 宽；右侧键值表**键名左对齐**、值左对齐，纵向多行。
+
+| 文件 | 改动 |
+|---|---|
+| `app/components/file_info_dialog.py` | ① 标题由居中 `TitleLabel("文件信息")` 改为左对齐 `StrongBodyLabel("文件名：")` + 跑马灯文件名；② 封面画框 240×240 → **270×340 竖向**（`_COVER_W`/`_COVER_H`，`_decode_cover` 按 KeepAspectRatio 缩放，`_placeholder_pixmap` 同步竖向 + 音符 96px）；③ 键值表由「键右对齐 + stretch 1:4」改为**键左对齐 + 固定键列 76px（ `_KEY_COL_W`）+ 值列吃剩余**，列间距 18、行间距 11，两栏间距 16；④ 对话框宽 720–780 → 780–840；⑤ 移除未再使用的 `TitleLabel` 导入 |
+
+**决策说明（证据）**：
+- **键列必须定宽**：旧版键右对齐靠 `stretch 1:4` 自然对齐；改左对齐后若仍用 stretch，最长键「完整路径」会撑宽列、其余键indent 参差。固定 76px（4 字 + 余量）后 14 行键名起点一致。
+- **画框竖向但内容等比**：`_decode_cover` 返回的 pixmap 是等比缩放后的**实际尺寸**（正方形封面 → 270×270，非正方形 640×480 → 270×202），画框由 `QLabel.setFixedSize(270, 340)` + `AlignCenter` 承载，正方形图上下留白属预期，不裁切不变形。
+- **标题用跑马灯**：文件名可能很长（加密后缀 + 中文名），`MarqueeLabel(bold=True, auto=True)` 溢出自动滚动，不撑破宽度；窗口标题栏仍是「文件信息」。
+
+**保持不变**：14 行字段与完整路径可点击链接、跑马灯单行语义、底部两按钮等分铺满、对话框内 `statusLabel` 兜底、右键菜单 3 项、封面缓存链路、保存回调契约。
+
+**验证**：`compileall` 通过；**33 项 offscreen 断言全 PASS** —— 封面解码（正方形 / 非正方形 / 损坏字节 / 占位图）、标题行控件类型与文案、画框 270×340 / 状态行宽 / 对话框宽 780–840、键左对齐 / 键列 76px / 间距 16-18-11、真实几何封面 x=25 < 键 x=311 < 值 x=405 且间距 16/18px 紧凑、标题在封面上方、14 行 28 项与路径链接零回归、保存回调与状态行、无封面禁用、右键菜单 3 项；offscreen 渲染快照确认视觉；源码 offscreen 启动 3s 无 Traceback，`config.json` 未改，分层依赖违规 **0**。
+
+**踩坑（测试脚本，非实现缺陷）**：初版断言误以为 `_decode_cover` 返回固定画框尺寸，实际返回等比缩放后的实际 pixmap（画框由 QLabel 固定）；菜单源码断言误匹配到 docstring 里的「保存封面不再放在这里」说明。两处断言修正后全过。
+
+**说明**：全程只跑源码验证，**未执行任何 Nuitka 打包命令**。
+
+### 变更：保存成功回归默认提示 + 左右分栏间隔收紧（2026-11-23）
+
+**需求**：「取消保存成功后，信息提示框上的查看按钮，改为默认的成功提示，中间间隔不要太大，紧凑一点。」本条取代同日「封面保存固定同名覆盖 + 提示条『查看』大图预览」中的「查看」链路。
+
+| 文件 | 改动 |
+|---|---|
+| `app/common/signal_bus.py` | 删除 `cover_saved = Signal(str)`——不再需要专用信号 |
+| `app/view/decrypted_interface.py` | `_save_cover()` 成功后由 `cover_saved.emit(target)` 改发 `signalBus.toast_requested.emit(f"已保存到音乐文件同目录: {basename}", "success")`；模块头与 docstring 同步 |
+| `app/view/home_interface.py` | 删除 `cover_saved` 连接、`_show_saved_cover_toast()` / `_view_saved_cover()`、`_COVER_TOAST_DURATION_MS` 常量及 `InfoBarIcon` / `TransparentPushButton` / `CoverPreviewDialog` 导入；保存成功统一走既有 `_show_toast()` → `InfoBar.success`（3s、无动作按钮） |
+| `app/components/file_info_dialog.py` | `bodyLayout` 两栏间距 24→12、`grid` 键值列间距 20→12、列 stretch 2:3→1:4；注释与 `_on_save_clicked` docstring 同步 |
+| `app/components/cover_preview_dialog.py` | **文件保留**、不再接线；docstring 顶部标注「当前未接线，保留备用」及原因 |
+
+**决策说明（证据）**：
+- **「默认成功提示」= 既有 `_show_toast` 通道**：`InfoBar.success`，3s、右上角、可关闭、无附加按钮。专用 8s 带按钮提示条整条链路（信号 / 方法 / 常量 / 导入）一并移除，不留死代码。
+- **空白来源有两处**：两栏 24px 间距 + 键名列占 2/5 宽后右对齐产生的左侧留白。在同一对话框内切换参数做对照测量：封面右边缘 → 首行键名左边缘 **143px → 58px（降幅 59%）**；键名仍右对齐，值列反而由更宽（实测 325px），长路径跑马灯显示空间更大。
+- **预览组件不删**：用户只圈定「取消查看按钮」，保留实现便于日后复用；但已从首页移除 import，全项目无悬空引用。
+
+**保持不变**：对话框内 `statusLabel` 兜底反馈（遮罩仍可能盖住首页浮层）、14 行信息表与路径链接、左封面解码 / 占位图、底部两按钮等分铺满、右键菜单 3 项、封面三级缓存与同名覆盖、成功日志。
+
+**验证**：`compileall` 通过；**31 项 offscreen 断言全 PASS** —— `cover_saved` 源码与运行期属性均消失、首页无「查看」按钮与专用导入、成功仅发一条 `success` toast 且文案含文件名、真实 `MainWindow` 弹出的 InfoBar 无「查看」/无任何动作按钮、旧新参数同控件对照几何、键名右对齐 / 值列更宽 / 14 行、底部按钮仍铺满、对话框状态行成功失败零回归、无封面禁用、封面解码、右键菜单、分层依赖违规 **0**；offscreen 渲染快照确认紧凑效果；源码 offscreen 启动 3s 无 Traceback，`config.json` 未改。
+
+**说明**：全程只跑源码验证，**未执行任何 Nuitka 打包命令**。
+
+### 变更：保存封面入口移入文件信息对话框 + 按钮文案（2026-11-23）
+
+**需求**：「右侧增加一个保存封面按钮，取消右键保存封面。关闭改为关闭窗口。」本条取代上一节「仅保留单个『关闭』按钮」与右键菜单里的保存入口。**同日微调**：「两个按钮占满底部，不要都在右侧」——按钮由挤在右半区改为等分铺满整行，见下方「同日微调」段。
+
+| 文件 | 改动 |
+|---|---|
+| `app/components/file_info_dialog.py` | 底部按钮行由单个「关闭」改为**等分铺满整行**的「保存封面」（`PushButton(FluentIcon.SAVE, …)`，次要按钮）+「关闭窗口」（复用主按钮）。最终实现不用 `hideCancelButton()`（它会插左侧留白把按钮挤到右半区），改为直接隐藏并 `removeWidget(cancelButton)` 摘掉隐藏项，再把 `saveButton` 插到 `yesButton` 之前，两项各持 `stretch=1` 平分全部宽度；新增可选 `save_cover=None` 回调与左栏 `statusLabel`（默认隐藏）。无封面 / 未注入回调时禁用按钮并给 ToolTip |
+| `app/view/decrypted_interface.py` | 右键菜单移除「保存封面」Action（现为 查看信息 / 播放音乐 / 删除文件）；`_show_file_info()` 注入 `save_cover=lambda: self._save_cover(card)`；`_save_cover()` 改返回 `(ok, payload)`（成功=导出完整路径，失败=可直接展示的原因文案），失败不再另发 toast、只记 error 日志；成功仍逐次发 `signalBus.cover_saved`，首页带「查看」提示条与应用内预览不变 |
+
+**决策说明（证据）**：
+- **落盘仍在 view，对话框只发意图**：`components` 只依赖 `common`，不写盘；对话框源码内不含 `open(`，通过注入回调调用 `_save_cover(card)`，复用现有字节缓存 / 两级缓存回填 / 同名覆盖写 / 日志全链路。
+- **保存反馈必须在对话框内可见**：模态遮罩可能盖住首页 InfoBar 浮层，因此新增左栏状态行做兜底；成功文案手动断成「说明 + 文件名」两行（240px 窄栏自动折行会碎成 3~4 行，offscreen 快照已比对）；失败保持窗口打开、按钮可重试，不自动关窗。
+- **隐藏的 cancelButton 会吃掉宽度**：`QBoxLayout` 对 hidden widget 仍计算 stretch，不 `removeWidget` 时两个可见按钮被压窄。首版曾额外补一份左侧 stretch 让按钮落在右半区（x=373 / 560、各 175px），用户同日纠正后去掉全部 stretch，改为等分铺满整行。
+
+**保持不变**：14 行键值表与路径链接、左封面解码 / 占位图、封面三级缓存、同目录同名 `.png` 直接覆盖、成功日志、删除确认；`cover_saved` → 带「查看」InfoBar 链路在同日后续条目中被移除，见最前一条。
+
+**验证**：`compileall` 通过；**62 项 offscreen 断言全 PASS** —— 右键菜单源码 + 运行期菜单文本（3 项，无「保存封面」）、按钮文案与几何（等宽 / 左右顺序 / cancel 已摘除）、成功 / 失败状态行、无封面与无回调两种禁用、13 项信息表与封面解码零回归、查看信息 → 回调 → `_save_cover` 全链路、`_save_cover` 首次 / 重复覆盖 / 无封面 / 写入失败四分支、`cover_saved` 与日志、真实 `MainWindow` 下按钮尺寸与状态行、首页提示条「查看」按钮零回归、分层依赖违规 **0**；两张 offscreen 渲染快照确认按钮不重叠、状态行不挤压封面；源码 offscreen 启动 3s 无 Traceback，`config.json` 未改。
+
+**同日微调：底部按钮等分铺满整行**（用户：「两个按钮占满底部，不要都在右侧」）：`app/components/file_info_dialog.py` 去掉 `hideCancelButton()` 与两份左侧 stretch，改为 `cancelButton.hide()` + `removeWidget(cancelButton)` + `insertWidget(0, saveButton, 1)`，按钮布局由 4 项（2 留白 + 2 按钮）变为 2 项。实测 widget 720px 时 `buttonGroup=718`、两按钮各 329px（x=24 / 365，右界 693），`329+12+329=670 = 718−48`，刚好铺满扣除 24px 左右边距与 12px 间距后的全部宽度；offscreen 渲染快照确认左右贴边、等宽、无重叠。**40 项 offscreen 断言全 PASS**（含 3 个宽度场景、真实 MainWindow、保存回调 / 状态行 / 禁用分支 / 右键菜单 / 分层零回归）。
+
+**踩坑（测试脚本，非实现缺陷）**：① 快照脚本未 `close()` 窗口时进程退出码 127（Qt 后台线程未清理），补 `dlg.close() / win.close() / processEvents()` 后 exit 0；② 对话框未 `show()` 时连续 `widget.resize()` 不触发布局重算，几何停在上一个尺寸导致 780px 断言误报，改为每个宽度独立构造并真实 `show()` 后取几何；③ 遮罩对话框 widget 宽度由 sizeHint 固定为 720px，`AlignCenter` 父布局会把人为 resize 拉回，故三个宽度场景实际都收敛到 720px 且均铺满。
+
+**说明**：全程只跑源码验证，**未执行任何 Nuitka 打包命令**。
+
+### 新增：查看文件信息左右分栏（左封面 / 右信息）（2026-11-23）
+
+**需求**：「查看文件信息附带封面，左侧显示封面，右侧显示信息。」
+
+| 文件 | 改动 |
+|---|---|
+| `app/components/file_info_dialog.py` | 主体从「单列 14 行键值表」改为 `QHBoxLayout` 左右分栏：左侧 240×240 封面位（等比缩放不裁切 + 圆角，下方标注原图像素），右侧保留原 14 行键值表；新增 `_decode_cover()` / `_placeholder_pixmap()`，`cover=None` / 损坏字节回退主题色大号音符占位图；对话框宽度 380–430 → 720–780。签名在**末尾**追加可选 `cover=None`，原有位置参数顺序不变 |
+| `app/view/decrypted_interface.py` | 抽出 `_load_cover_bytes(path, mtime, card, item)` 供「查看信息」与「保存封面」共用：命中字节缓存零 ffmpeg，MISS 现场 `extract_cover_bytes()` 一次并回填字节 + 缩略图两级缓存、让卡片立即出图；`_show_file_info()` 把封面字节传给对话框。两个缓存都 MISS 时用 `probe_media()` 一次 ffmpeg 同时拿标签 + 封面 |
+
+**保持不变**：14 行键值表内容、键右对齐 / 值左对齐、跑马灯单行滚动、完整路径强调色可点击链接 + ToolTip、单「关闭」按钮；封面用的是 ffmpeg 提取的**原始 PNG**，不是卡片上的 44×44 缩略图。
+
+**决策说明**：
+- 左侧封面用 `KeepAspectRatio` 而非居中裁剪：非正方形封面（实测 640×480 / 300×600）需完整展示，圆角只作用在缩放后的实际矩形上。
+- 双 MISS 走 `probe_media()`：新增封面本会让「查看信息」在极端情况串行起 `probe_audio_info` + `extract_cover_bytes` 两个进程，合并后任何情况最多一次 ffmpeg。
+
+**验证**：`compileall` 通过；**39 项 offscreen 断言全 PASS** —— 解码纯函数（800×800→240×240 / 640×480→240×180 / 300×600→120×240 / 圆角透明 / 无效字节）、占位图、左右两栏顺序与真实布局几何（封面栏 x=25 宽 240、信息栏 x=289 宽 446）、原图像素标注、14 行内容与路径链接零回归、无封面 / 损坏字节 / 不传 cover 三种占位回退、缓存命中零 ffmpeg、MISS 一次提取并回填两级缓存 + 卡片出图、双 MISS 只一次 `probe_media` 且回填后再看零 ffmpeg、「保存封面」零回归；offscreen 真实窗口显示 1.5s 无异常，`config.json` 未改，分层依赖违规 **0**。
+
+**说明**：全程只跑源码验证，**未执行任何 Nuitka 打包命令**。
+
+### 变更：封面保存固定同名覆盖 + 提示条「查看」大图预览（2026-11-23）
+
+**需求（用户明确圈定）**：「保存不带后缀，若是重复，则直接覆盖，然后在弹窗上加一个查看按钮，点击即可查看已保存的封面图。」本条取代下方「同名自动加 `_2/_3`、不覆盖」的策略。
+
+| 文件 | 改动 |
+|---|---|
+| `app/view/decrypted_interface.py` | 移除 `_unique_cover_path()`，改为纯函数 `_cover_path(music_path)` 固定返回同目录同名 `.png`；`_save_cover()` 以 `"wb"` 直接覆盖写，**不做 `exists` 预检**（避免 TOCTOU 竞态）；成功不再发普通 toast，改发 `signalBus.cover_saved(target)`；写入失败文案补「文件是否被占用」；模块头与 docstring 同步 |
+| `app/common/signal_bus.py` | 新增 `cover_saved = Signal(str)`（完整路径），view 之间仍零直接引用 |
+| `app/view/home_interface.py` | 连接 `cover_saved` → `_show_saved_cover_toast()`：用 `InfoBar` 直接构造、**先 `addWidget()` 再 `show()`**（InfoBarManager 在 showEvent 按 `infoBar.width()` 算右上角 x，反序会让浮层贴边错位），附 `TransparentPushButton(FluentIcon.VIEW, "查看")`；duration 8000ms（普通 toast 仍 3000ms）；`_view_saved_cover()` 收掉提示条再弹预览，文件已被移动则给 warning |
+| `app/components/cover_preview_dialog.py`（新） | `CoverPreviewDialog(MessageBoxBase)`：从磁盘读刚保存的 PNG，超过 520px 等比缩小、小图不放大，标注文件名 + 原图像素，单「关闭」按钮；无效图片降级为文字提示 |
+
+**契约变化**：重复保存**直接覆盖同名 PNG**，不再生成 `_2/_3` 副本，也不再保护目录里原有的同名资源；一键保存仍不弹任何对话框。导出内容仍是 ffmpeg 提取的**原始封面**（非 44×44 缩略图），两级缓存复用、缓存 MISS 现场提取、无封面 warning、写入失败 error toast 均不变。
+
+**决策说明**：「查看」采用**应用内遮罩预览**而非 `QDesktopServices.openUrl()`：不依赖系统 `.png` 关联程序、点即得且可离线断言；与 `FileInfoDialog` 同用 `MessageBoxBase`，主题（浅/深色）自动跟随。
+
+**验证**：`compileall` 通过；**40 项 offscreen 断言全 PASS**——纯函数固定路径 / 多点后缀 / 已存在同名仍返回固定路径、旧序号函数与 `QFileDialog` 彻底移除、首次与重复/第三次保存字节一致且目录只有一张图无 `_2`/`_3`、`cover_saved` 路径与 success 日志、成功不发普通 toast、写入失败 / 无封面 / 缓存 MISS 现提三分支、真实 `MainWindow` 触发 1 条带「查看」按钮的 InfoBar（8000ms、按钮有实际尺寸且位于关闭按钮左侧）、按钮接线、收条 + 弹预览、800×800→520×520 等比缩放 / 小图不放大 / 无效图片降级、文件被移动 warning、`InfoBar.close()` 不抛异常；offscreen 真实窗口显示 2s 无异常，`config.json` 未改，分层依赖违规 **0**。
+
+**说明**：全程只跑源码验证，**未执行任何 Nuitka 打包命令**。
+
+### 变更：保存封面改为一键落盘到音乐文件同目录（2026-11-23）
+
+**需求（用户明确圈定）**：「封面默认保存在音乐文件同目录」。经确认选择「直接保存、不弹框」——原实现虽已把对话框默认路径设为同目录，但仍要求用户每次点确认，不是「默认保存」。
+
+**改动**（仅 `app/view/decrypted_interface.py`）：
+
+- 移除 `QFileDialog.getSaveFileName()` 与 `QFileDialog` import：点击「保存封面」直接写入音乐文件所在目录的 `<歌曲名>.png`，不再弹保存对话框。
+- 新增模块级纯函数 `_unique_cover_path(directory, stem)`：同名已存在时依次尝试 `<stem>_2.png` / `_3.png`…，**不覆盖**用户此前导出的图片或目录里原有的同名资源。免对话框意味着没有确认覆盖的机会，这是必须的保护。
+- 反馈调整：toast 改为「已保存到音乐文件同目录: xxx.png」，日志仍记完整路径；菜单图标 `FluentIcon.SAVE_AS` → `SAVE`（语义从「另存为」变为「直接保存」）。
+- 模块 docstring 与 `_save_cover` docstring 同步新契约。
+
+**保持不变**：导出内容仍是 ffmpeg 提取的**原始 PNG**（非 44×44 缩略图）；缓存命中零 ffmpeg、MISS 时现场提取并回填两级缓存；无封面 warning、写入失败 `logger.error` + error toast；右键菜单顺序「查看信息 / 播放音乐 / 保存封面 / 删除文件」。
+
+**验证**：`compileall` 全项目通过；**19 项单元断言全 PASS**——无 QFileDialog 依赖、菜单顺序与 SAVE 图标、纯函数序号、首次同目录同名写入且字节与源一致（1024×1024 合法 PNG）、缓存命中零 ffmpeg、toast/日志路径、重复保存生成 `_2`/`_3` 且原文件未被覆盖、无封面零写入 + warning、写入失败 error 不抛异常、MISS 现场提取一次并同样落到同目录。offscreen 启动 15 秒无异常，工具链就绪，`config.json` 未改，分层依赖违规 **0**。
+
+**说明**：本轮用缓存中的真实 PNG 字节做端到端落盘验证，未重复跑真实 flac 的 ffmpeg 提取（该链路上一条记录已实测 800×800 / 930KB 合法 PNG，本轮未改动）。全程只跑源码验证，**未执行任何 Nuitka 打包命令**。
+
+### 新增：全屏列数切换的 FLIP 位移动画（2026-11-23）
+
+**需求**：窗口全屏 / 最大化导致 2 列变为 4 列（或更多）时，卡片要有**带移动效果**的过渡动画，而非瞬间硬切。
+
+**替换关系**：本条目取代 2026-11-20「列数变化时视口卡片 0.72→1.0 / 160ms 统一柔和淡入」的方案。淡入只遮掩了硬切、没有位移；现在改为真实几何插值，`_soft_relayout_fade()` 与 `_RELAYOUT_FADE_MS` 已移除。
+
+**实现**（仅 `app/components/grid_card_container.py`）：
+
+- 标准 FLIP（First-Last-Invert-Play）：`_snapshot_visible_geometry()` 在摘布局前记录视口上下各一行卡片的 `QRect`（First）；重排收敛到新几何（Last）后 `_play_relayout_motion()` 把卡片 Invert 回旧位置；单个 `QVariantAnimation` 逐帧 `Play` 到新位置。
+- **插值完整 `QRect`（x/y/w/h）而非只 `move()`**：列数变化会同时改变位置**与列宽**（实测 2 列 714px → 4 列 351px），只移动会留下宽度错位/重叠。
+- **单动画批量刷几何**：`_apply_relayout_frame()` 一帧内对所有卡片 `setGeometry`，不每卡挂一个 `QPropertyAnimation`——延续项目「几十个动画并发抢事件循环」的既有教训。实测 40 张单帧插值 **0.15ms**，作用域 22/120 张（与卡片总量解耦）。
+- **无旧几何的卡片短淡入**：列数变化后新进入视口的卡片归入 `newcomers`，从 0.72 淡入且与位移**共用同一个动画对象**；有位移的卡片保持完全不透明，避免叠加透明度让画面发虚。
+- 缓动 `OutCubic` / 280ms，与瀑布流入场的 `OutQuart` 刻意区分：几何移动更需要「稳稳停住」的收尾。
+- 类开关 `relayout_motion = True`；`_filling` 期间与首次排布（`_grid_cols == 0`）不触发。即时页 `_relayout()` 与懒加载页 `_relayout_lazy()` 两条路径共用同一套机制。
+
+**收敛设计（关键）**：`eventFilter` 的 viewport Resize、`_on_lazy_scroll`、`_cancel_fade_in()`（重建 / 刷新）三处统一调用 `_cancel_relayout_motion()`，把卡片立即收敛到目标几何并卸载 effect，绝不让卡片停在半路进入下一轮布局。`_snapshot_visible_geometry()` 抓取前也先收敛——业务主动重排若撞在动画播放中途，First 仍是稳定终点而非插值半路。动画结束时 `_settle_relayout_motion()` 精确落到目标 `QRect`，消除插值取整误差。
+
+**风险验证**：Qt 布局是否覆盖逐帧 `setGeometry` 是本次最大不确定点。实测手动置中间态后处理事件循环，几何仍为 `(544,0,532,64)`（start `(726,0,714,64)` / end `(363,0,351,64)`），未被 `QGridLayout` 拉回；动画自然推进期间也确实出现逐帧中间值。
+
+**验证**：`compileall` 全项目通过；两轮 offscreen 实测共 **54 项断言全 PASS**（29 项即时页/边界 + 25 项懒加载/集成）——Invert 起点、插值中间态、布局不覆盖、结束精确落位、4→2 反向、连续切换/滚动/重建收敛、隐藏页 pending、开关关闭零动画、快照收敛、newcomer 淡入无残留、真实 `TaskInterface` 2→4 列触发并收敛、导航切换无异常、平台图标与封面位零回归。offscreen 启动 15 秒无异常，工具链就绪，`config.json` 未改，分层依赖违规 **0**。
+
+**说明**：offscreen 下 `MSFluentWindow` 的 stacked 页面宽恒为 100、`isVisible=False` 且启动期 `_filling=True`，集成验证中显式 `switchTo(task)` + 结束填充并给视口确定宽度，才复现真实全屏状态；此为测试环境限制，非实现缺陷。全程只跑源码验证，**未执行任何 Nuitka 打包命令**。
+
+### 新增：已解密页右键「保存封面」（2026-11-23）
+
+- **需求**：已解密界面右键菜单增加「保存封面」。
+- **实现**（`app/view/decrypted_interface.py`）：
+  - 菜单顺序改为「查看信息 / 播放音乐 / **保存封面**（`FluentIcon.SAVE_AS`）/ 删除文件」，删除项仍居末。
+  - 新增 `_save_cover()`：导出的是 ffmpeg 提取的**原始内嵌封面 PNG**，不是卡片上 44×44 的圆角缩略图。优先复用 `_cover_cache` 已缓存字节（显示过封面的卡片零 ffmpeg、瞬时）；缓存 MISS 才用 `extract_cover_bytes()` 同步提取一次（等待光标反馈），并把结果回填字节缓存 + 缩略图缓存，顺带让卡片立即出图、之后再次显示也秒加载。`None`（确认无封面）同样写入缓存，避免重复起进程。
+  - 保存路径走 `QFileDialog.getSaveFileName()`，默认与歌曲同目录、同名 `.png`（filter `PNG 图片 (*.png)`），非 `.png` 结尾自动补后缀；用户取消不写文件；写入失败记 `logger.error` 并给 error toast；成功发 log + success toast。
+- **验证**：`compileall` 全项目通过；**20 项单元断言全 PASS**（菜单顺序与 Action 绑定、缓存命中零 ffmpeg、默认路径与标题、后缀补齐、取消不写文件、无封面不弹对话框且给 warning、无封面缓存、MISS 现场提取一次并回填两级缓存、卡片立即出图、写入失败不抛异常）；**真实 flac 端到端导出得到 800×800 / 930KB 合法 PNG**；offscreen 启动无异常、`config.json` 未改、分层依赖违规 0。
+- **未验证**：Windows native 保存对话框的实际交互（offscreen 下用 mock 验证调用参数；项目 `setting_interface` / `task_interface` 已用同一 `QFileDialog` API，属既有可靠路径）。
+- **全程只跑源码验证，未执行任何 Nuitka 打包命令。**
+
+### 优化：已显示封面再次显示「秒加载」（2026-11-23）
+
+- **需求**：已经显示过的歌曲专辑封面，再次显示到界面时应瞬时出现，优化显示逻辑。
+- **实测证据（offscreen，真实 800×800 / 930KB 内嵌封面）**：
+  - `ffmpeg` 首次探测单文件封面 + 标签平均 **254.1ms**；输出目录实测 379 个音乐文件。
+  - 单次 `_rounded_cover()`（PNG 解码 → 缩放 → 圆角裁剪）**16.3ms**；40 张可见卡片「再次显示」**680.9ms**，其中 40 次占位图重绘另占 18.5ms。
+  - 直接贴已生成的 44×44 QPixmap：40 张仅 **0.17ms**，差距约 4000×。
+- **根因**：`common/cover_loader.CoverCache` 只缓存 ffmpeg 输出的**原始 PNG 字节**（实测约 1MB/张）。卡片每次重新进入视口（滚动回来、切页回来、全屏 2→4 列重排物化）都要重跑一次 QImage 解码 + 缩放 + 圆角裁剪，缓存挡住了 ffmpeg 却没挡住图像解码。
+- **附带发现的逻辑缺陷（实测复现）**：字节 LRU 容量 512 淘汰后，`_apply_cover` MISS → `_ensure_media` 因 `item in self._tags` 判重直接返回，且 `_take_media_item` 又按 `_tags` 把该项当「已完成」丢弃 → **封面永久停在占位图**，直到重启程序。
+- **改动**：
+  - `app/components/cover_thumb_cache.py`（新）：`(path, mtime) → 44×44 圆角 QPixmap | None` LRU，容量 2048（约 16MB，远大于字节缓存 512，让显示过的缩略图不被挤掉）；`None` 与 `MISS` 用哨兵严格区分。QPixmap 为 GUI 资源，明确约定仅主线程调用。
+  - `app/components/task_card.py`：新增 `set_cover_pixmap()`（跳过解码直接贴）；`set_cover()` 改为返回裁剪结果供调用方缓存。
+  - `app/view/decrypted_interface.py`：`_apply_cover()` 改三级缓存 —— **缩略图命中 → 直接 setPixmap；字节命中 → 解码一次并回填缩略图；都 MISS → 清旧封面 + 登记 ffmpeg**。`_on_media_done()` 回填时同步写缩略图缓存；`_reuse_card()` 不再无条件 `set_cover(None)`，命中缓存时省掉中间那次占位图重绘，未命中才清。
+  - 淘汰缺陷修复：`_ensure_media(..., for_cover=True)` 由 `_apply_cover` 发起，绕过 `_tags` 判重并把 item 记入 `_cover_recheck`；`_take_media_item()` 判据改为 `(cand not in _tags or cand in _cover_recheck)`；`_on_media_done()` / `_prune_media_queue()` 清理标记。**归类用的全量补探测仍走 `_tags` 判重**，不对已有标签的文件重跑 ffmpeg。
+- **验证**：`compileall` 全项目通过；**26 项单元断言全 PASS**（三级缓存命中、零解码、None/MISS 区分、mtime 失效、LRU、复用卡片零占位图重绘、淘汰后重载、回填写缓存、归类不重跑、主题切换、任务页平台图标零改变）；**40 张再次显示 680.9ms → 0.26ms（约 2600×）**；真实 MainWindow 集成：379 个文件、预热后 20 张缩略图、切走→切回期间**封面解码次数 = 0**、缓存数 20→20 稳定；offscreen 启动无异常、`config.json` 未改、分层依赖违规 0。
+- **未改动**：原始字节 LRU 容量保持 512 不变（归类全量探测时约占用数百 MB，属既有行为；缩容会触发重新探测反而更慢，如需收敛须另做磁盘缩略图持久化，本轮未扩大范围）。
+- **全程只跑源码验证，未执行任何 Nuitka 打包命令。**
+
+### 优化：全屏列数切换与页面切换的重排算法（2026-11-20）
+
+- **需求**：全屏时 2 列变 4 列卡顿严重；任务管理 ↔ 已解密 切换也卡顿。要求从逻辑算法层面提升流畅度，而非只调动画参数。
+- **实测证据（offscreen 基准，400 张真实 TaskCard）**：
+  - 优化前 2→4 列 `_relayout()` **644.6ms**；cProfile 热点 `setParent` 326ms / `show` 274ms / `addWidget` 265ms，伴随 10824 次 QFluentWidgets 样式事件过滤器。
+  - 优化前页面切换：任务管理→已解密 **1965ms**（含 `TaskInterface._relayout` 764.5ms）、已解密→任务管理 **2486ms**（含 1019.4ms）。**隐藏页面仍被全量重排**。
+- **根因**：`_relayout()`（即时页 / 任务管理）一直沿用旧的「`takeAt` → `setParent(None)` → `addWidget` → `show`」全量摘挂；`_relayout_lazy()`（已解密）早已改为「保留 parent」并有 116ms→21ms 的实测记录，但即时页没跟进。且即时页缺少「视图未变就短路」机制，导航切页引发的 viewport Resize 也会无条件重排一次。
+- **改动**：
+  - `app/components/grid_card_container.py`：
+    - `_relayout()` 改为**只摘布局项、不脱离 parent**：卡片保持 `scrollContent` 子控件与 visible，回填 `addWidget` 不再迁移 parent、无需 `show`；`setUpdatesEnabled(False/True)` 包住避免中间帧。
+    - 新增 `_last_layout_seq`（参与排布卡片 id 元组）：**列数与序列都未变即短路**，只刷新计数、零摘挂零布局补算。
+    - 可见性判断刻意放在**防抖定时器回调** `_on_relayout_timeout()` 而非 `_relayout()` 内部：业务主动重排（后台重建列表、增删卡片）仍同步执行以保证几何正确，只有尺寸变化类重排才在页面隐藏时跳过；`eventFilter` 隐藏页 Resize 直接记 pending，`showEvent` 统一补排一次。
+  - `app/view/decrypted_interface.py`：
+    - 新增 `_media_paused` 过渡期节流：`showEvent` 暂缓提交 ffmpeg 240ms（切换动画期间主线程在做整窗重绘），`hideEvent` 暂停，`_pump_media` 早退只攒队列，`_resume_media` 按可见优先恢复；队列不丢任务。
+- **优化后实测**：
+  - 2→4 列重排 **30.5ms 同步 / 68.1ms 含事件循环**（≈21× / 9.5×）；列数不变重复重排 **0.06ms**。几何校验：4 列、第 5 张落在 `(1,0)`、400 张全 visible、内容高 7390，全部正确。
+  - 页面切换（冷态）1965/2486ms → **964/1480ms**；其中重排 764/1019ms → **0/35.6ms**。
+  - **稳定态 A→B→A 四次切换重排调用全部为 0**（短路完全生效），耗时 1413→804→753→422ms，剩余为动画与渲染。
+  - 媒体节流：切换总耗时 1014→832ms，最慢帧 147→112ms（禁用探测对照组 839ms）。
+- **验证（仅源码，禁打包）**：py_compile 4 文件过；10 项回归断言全 PASS（保留 parent、几何位置、短路、隐藏页 pending、媒体暂停/恢复）；offscreen 启动 15s 无异常、工具链就绪、`config.json` 未改、分层违规 0。
+
+### 优化：全屏切换重排与入场动画的流畅度（2026-11-20）
+
+- **需求（用户圈定）**：任务管理 / 已解密两页的卡片列表，在窗口全屏/最大化 ↔ 普通之间切换时重排有顿挫；卡片刷新入场的瀑布流动画想更细腻。**不涉及**左侧导航的页面切换动画。
+- **卡顿根因（代码证据）**：
+  - `_RELAYOUT_DEBOUNCE_MS=40` 短于 Windows 最大化动画（约 250ms）的偶发帧间隙（45~60ms），会在动画中途触发 2~3 次全量摘挂；
+  - viewport Resize 时，在途的错峰淡入 / 滚动短淡入与重排抢事件循环——此前只在 `_on_lazy_scroll` 做了收敛，resize 路径漏掉；
+  - 列数跳变时卡片硬切到新位置，没有任何视觉过渡。
+- **改动（仅 `app/components/grid_card_container.py`）**：
+  - 防抖 40 → **80ms**，覆盖常见动画空档，尺寸稳定后一次到位；
+  - `eventFilter` 的 viewport Resize 分支先 `_cancel_fade_in()`，与滚动收敛逻辑对齐；
+  - 新增 `_visible_grid_cards()`（只取视口上下各一行，作用域与卡片总量解耦）+ `_soft_relayout_fade()`：列数变化时对视口卡片做 0.72→1.0 / 160ms 统一柔和淡入。**复用 `_batch_fade` 单动画槽位**，而非每卡一个 QPropertyAnimation——实测作用域 44/120 张时仍只有 1 个动画对象，不重蹈「几十个动画并发抢事件循环」的覆辙；
+  - 即时页 `_relayout` 与懒加载页 `_relayout_lazy` 两条路径均接入；`_filling` 期间跳过，不与渐进填充的冻结逻辑冲突；
+  - 瀑布流参数：三处分散的 `OutCubic` 统一为 `_FADE_EASING = OutQuart`（起步利落、收尾绵长），duration 220→**260ms**，stagger 16→**18ms**，滚动短淡入 140→**170ms**；stagger 仍按绝对时间补发，不受定时器抖动累积。
+- **验证（仅源码，禁打包）**：py_compile 通过；13 项单元断言全 PASS（80ms 防抖、18/260/170 参数、OutQuart、即时页/懒加载页列数变化均触发柔和淡入且作用域 44/120 与 44/160、单动画槽位、零并发单卡动画、opacity 起点 0.72、列数不变零额外开销、Resize 收敛在途动画）；offscreen 启动 15s 无异常、工具链就绪、`config.json` 未改、分层违规 0。
+
+### 重构：平台图标改用 QFluentWidgets 官方 FluentIconBase 定义（2026-11-20）
+
+- **需求**：参考 `https://qfluentwidgets.com/zh/pages/icon/` 官方自定义图标定义与用法，改造已注册的平台图标；使用 qrc 编译、`:/` 资源路径。
+- **官方范式**：自定义图标继承 `FluentIconBase` + `Enum`，重写 `path()` 返回 `:/` 开头的 qrc 路径，即可作为图标参数传给接受 `FluentIconBase` 的组件；`icon()` / `qicon()` 官方接口直接可用。
+- **关键适配**：官方 SVG 用 `getIconColor(theme)` 切黑/白版本；本项目平台 logo 是彩色 PNG，`path()` **忽略 theme**，任何主题都返回同一 `:/img/<name>.png`，避免主题切换错误着色。
+- **改动**：
+  - `app/common/icon.py`：新增 `PlatformIcon(FluentIconBase, Enum)`（6 成员：QQ/网易云/酷狗/酷我/喜马拉雅/汽水），`path()` 返回 `:/img/{value}.png`；保留 `FIcon` 别名零改动。
+  - `app/common/platform_icon.py`：`platform_icon_name()` → `platform_icon()`，返回值由字符串别名改为 `PlatformIcon` 枚举；53 后缀映射与最长匹配逻辑不变。
+  - `app/components/task_card.py`：构造参数 `icon_name` → `platform_icon`（`FluentIconBase`）；`set_platform_icon()` 经 `icon.path()` 取 `:/` 路径加载，复用圆角裁剪；移除 `common.resource.image` 依赖。
+  - `app/view/task_interface.py`：`_make_card` 传 `platform_icon=platform_icon(path)` 枚举。
+  - 重编译 `app/resource_rc.py`（pyside6-rcc，非 Nuitka 打包）。
+- **验证（仅源码，禁打包）**：py_compile 4 文件过；10 项端到端断言全 PASS（官方继承关系、53 后缀映射、最长匹配、44px 图标、彩色 PNG 忽略主题、真实图标主题保护、默认音乐图标、cover 零改变）；TaskInterface 接线通过；分层违规 0；offscreen 启动无异常、config 未改。
+
+### 新增：任务管理卡片左侧显示平台图标（2026-11-20）
+
+- **需求**：用 `um --supported-ext` 核对支持后缀与各平台加密格式，`resource` 内的平台 png 用于对应格式，其他格式用默认音乐图标；重编译 qrc；任务管理页左侧加图标，卡片布局参考已解密卡片。
+- **平台归属依据（证据）**：实跑 `tools/um.exe --supported-ext` 得 73 个后缀；从 um.exe 二进制提取算法包 `ncm / qmc / kgm / xiami / ximalaya` + 官方支持格式清单确认：
+  - `vpr` / `vpr.flac` 走 kgm 解码器（Viper 为酷狗品牌）→ 归**酷狗**；
+  - `xm` 由 xiami/ximalaya 共用，按用户约定（XM = 喜马拉雅）与 `x2m/x3m` 一起归**喜马拉雅**；
+  - um v0.2.20 无独立汽水音乐解码器，`QiShui_Music.png` 仅注册进 qrc 预留、未绑定后缀。
+- **改动**：
+  - `app/common/platform_icon.py`（新）：纯函数 `platform_icon_name(path)`，53 个加密后缀全映射到 6 平台图标，7 个明文后缀返回 None；按长度降序保证 `.kgm.flac`/`.mflac1` 等最长匹配。
+  - `app/resource.qrc`：注册 6 张平台 png；用 `.venv/Scripts/pyside6-rcc.exe` 重编译 `app/resource_rc.py`（资源编译，非 Nuitka 打包）。运行时 12 张资源全部加载成功。
+  - `app/components/task_card.py`：抽 `_rounded_pixmap()` 统一封面字节与 qrc 图标的居中裁剪+圆角；构造新增 `icon/icon_name` 参数，复用已解密卡片同一 44×44 左侧位；新增 `set_platform_icon()`；`cover` 模式行为零改变。修复 `QPixmap.scaled()` 返回 QPixmap、`drawImage` 只收 QImage 的类型错（统一 `.toImage()`）。
+  - `app/view/task_interface.py`：`_make_card` 传 `icon=True` + 解析出的平台图标名；连接 `themeChanged`/`themeColorChanged` → 只重绘默认音乐图标占位图，真实平台 logo 不受影响。
+- **验证（仅源码，禁打包）**：py_compile 6 文件通过；17 项单元断言全 PASS（无 icon 零改变、平台图标 44px 非空、默认占位图、主题刷新保护真实图标、cover 模式零改变、6 平台缩略图正常）；53 加密后缀映射覆盖 100%、明文 0 误映射；TaskInterface 实例化/建卡/主题回调/状态设置全通过；offscreen 启动 18s 无异常、工具链就绪、`config.json` 未改。
+
 ### 文档：README 同步当前实现（2026-11-19）
 
 - **需求**：根据当前情况，修改 README 文件。

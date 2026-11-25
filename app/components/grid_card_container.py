@@ -27,6 +27,13 @@
 的透明度效果，再按网格顺序逐张淡入，形成瀑布流式「从少到多、由隐到显」
 的错峰铺开。透明度只改绘制、不改几何，结束时立即卸载效果恢复原生绘制，
 因此不会触发 Qt 布局补算（不产生卡片位移）。
+
+列数切换呈现（类属性 ``relayout_motion = True``）：全屏 / 最大化导致
+2 列 ↔ 4 列（或更多）时走 FLIP 动画——重排前快照视口卡片旧几何（First），
+布局收敛到新几何（Last）后把卡片放回旧位置（Invert），再用单个
+QVariantAnimation 逐帧插值 x/y/w/h 播放到新位置（Play）。列数变化会同时
+改变位置和列宽，因此插值的是完整 QRect 而非仅 move()。无旧几何的新进
+视口卡片同步短淡入，与位移共用一个动画对象，不增加并发动画。
 """
 
 from collections import deque
@@ -36,6 +43,7 @@ from PySide6.QtCore import (
     QEasingCurve,
     QEvent,
     QPropertyAnimation,
+    QRect,
     QSignalBlocker,
     Qt,
     QTimer,
@@ -79,16 +87,31 @@ _CARD_POOL_MAX = 96
 # 卡片构建耗时不一（磁盘 stat / 徽章控件创建），按时间切片比固定张数
 # 分批更能把每帧开销稳定压在一帧预算内，填充期间交互不卡顿。
 _FILL_BUDGET_MS = 12
-# 视口 resize 重排防抖（毫秒）：拖拽缩放窗口时合并连续 resize 事件，
-# 只在停下后重排一次，避免期间每帧全量摘挂卡片。
-_RELAYOUT_DEBOUNCE_MS = 40
+# 视口 resize 重排防抖（毫秒）：拖拽缩放 / 全屏切换时合并连续 resize 事件，
+# 只在尺寸稳定后重排一次。原 40ms 在 Windows 最大化动画（约 250ms）期间
+# 会被帧间隙（偶发 45~60ms）切开，触发 2~3 次全量摘挂；提到 80ms 覆盖
+# 常见动画空档，改为一次到位，延迟仍低于人眼可感知的 100ms。
+_RELAYOUT_DEBOUNCE_MS = 80
 # 懒加载视口外预载行数：上下各多建几行，滚动方向上提前物化
 _LAZY_PRELOAD_ROWS = 2
 # 瀑布流入场：相邻卡片启动间隔 / 单卡淡入时长 / 滚动物化的短淡入。
 # 卡片按网格顺序错峰启动，前一张尚未淡完下一张已开始，视觉上逐行铺开。
-_FADE_STAGGER_MS = 16
-_FADE_DURATION_MS = 220
-_FADE_SCROLL_MS = 140
+# 缓动统一 OutQuart（比 OutCubic 起步更利落、收尾更绵长），时长略放大，
+# 让「逐行铺开」从急促变得从容；stagger 仍按绝对时间补发，不受定时器抖动累积。
+_FADE_EASING = QEasingCurve.OutQuart
+_FADE_STAGGER_MS = 18
+_FADE_DURATION_MS = 260
+_FADE_SCROLL_MS = 170
+# 全屏/缩放导致列数变化后的 FLIP 位移动画（First-Last-Invert-Play）：
+# 重排前快照视口卡片旧几何，重排收敛后把卡片放回旧位置，再用单个动画
+# 逐帧插值到新几何。只作用于视口附近几十张，开销与卡片总量无关。
+# 位移用 OutCubic（起步利落、落位绵长），与瀑布流入场的 OutQuart 刻意
+# 区分：几何移动比透明度变化更需要「稳稳停住」的收尾。
+_RELAYOUT_MOVE_MS = 280
+_RELAYOUT_MOVE_EASING = QEasingCurve.OutCubic
+# 无旧几何可插值（列数变化后新进入视口）的卡片：不从 0 开始，短淡入补位，
+# 避免凭空闪现。与位移共用一个动画对象，不额外增加并发动画。
+_RELAYOUT_FADE_MIN = 0.72
 # 单次最多错峰淡入的卡片数：超出部分（视口外）直接完全显示，
 # 避免千级列表把动画拖到数秒；40 张 ≈ 5 行 8 列首屏，覆盖典型视口。
 _FADE_MAX_CARDS = 40
@@ -106,6 +129,9 @@ class GridCardContainer(QWidget):
     lazy_fill = False
     # 瀑布流入场：新建卡片按网格顺序错峰淡入（只改绘制，不改几何）
     fade_in = True
+    # 列数切换位移动画：全屏 / 最大化导致 2 列 ↔ 4 列（或更多）时，
+    # 卡片沿插值路径滑到新格位，而非瞬间硬切。纯几何动画，不影响布局算法。
+    relayout_motion = True
     # 回收卡片复用池上限（懒加载页覆写 _park_card 时使用）
     card_pool_max = _CARD_POOL_MAX
 
@@ -135,7 +161,13 @@ class GridCardContainer(QWidget):
         self._relayoutTimer = QTimer(self)
         self._relayoutTimer.setSingleShot(True)
         self._relayoutTimer.setInterval(_RELAYOUT_DEBOUNCE_MS)
-        self._relayoutTimer.timeout.connect(self._relayout)
+        self._relayoutTimer.timeout.connect(self._on_relayout_timeout)
+        # 即时页短路判据：上次参与排布的卡片序列（id 元组）。列数与序列
+        # 都没变时几何本就正确，导航切页 / 滚动条显隐引发的 Resize 不该
+        # 触发整页摘挂。
+        self._last_layout_seq = None
+        # 页面隐藏期间收到的重排请求：showEvent 里补排一次即可
+        self._relayout_pending = False
 
         # 瀑布流入场：待淡入队列 + 节拍器 + 进行中的动画（保引用防 GC）
         self._fade_queue = deque()
@@ -144,6 +176,10 @@ class GridCardContainer(QWidget):
         self._fade_started = 0        # 当前错峰批次已启动的张数
         self._fade_batch_start = 0.0  # 批次起始单调时钟（按绝对时间补发）
         self._batch_fade = None       # 滚动短淡入：(QVariantAnimation, cards)
+        # 列数切换 FLIP 位移动画：(anim, pairs, fades)。
+        # pairs = ((card, 旧 QRect, 新 QRect), ...)，fades = 无旧几何的卡片。
+        # 整批只用一个 QVariantAnimation 逐帧刷几何，避免几十个动画抢事件循环。
+        self._move_anim = None
         # 懒加载重建期间关闭物化入场动画（改由 replay_fade_in 整屏脉冲）
         self._suppress_materialize_fade = False
         self._fadeTimer = QTimer(self)
@@ -264,12 +300,48 @@ class GridCardContainer(QWidget):
         """卡片被移除时的联动钩子（默认无操作）。"""
 
     # ------------------------------------------------------------ 事件
+    def _on_relayout_timeout(self):
+        """防抖到期：页面已隐藏就只记 pending，绝不为看不见的页面做全量摘挂。
+
+        可见性判断刻意放在这里而非 ``_relayout()`` 内部：业务主动触发的
+        重排（后台重建列表、增删卡片）必须同步执行以保证几何正确，不能
+        因为页面当时隐藏就被跳过；只有「尺寸变化」这类纯视觉重排才该省。
+        """
+        if not self.isVisible():
+            self._relayout_pending = True
+            return
+        self._relayout()
+
     def eventFilter(self, obj, event):
-        # 滚动区视口尺寸变化（窗口缩放 / 滚动条显隐）→ 防抖重排 + 同步浮层
+        # 滚动区视口尺寸变化（窗口缩放 / 全屏切换 / 滚动条显隐）→ 防抖重排
         if obj is self.scrollArea.viewport() and event.type() == QEvent.Resize:
+            if not self.isVisible():
+                # 导航切到别的页面时 Qt 仍会给隐藏页发 Resize。此时做全量
+                # 摘挂毫无意义（用户看不到），却是页面切换卡顿的主要来源；
+                # 只记一个 pending，等真正显示时补排一次。
+                self._relayout_pending = True
+                self._sync_overlay_geometry()
+                return super().eventFilter(obj, event)
+            # 在途的入场动画（错峰淡入 / 滚动短淡入）会与紧随其后的全量重排
+            # 抢事件循环，是全屏切换掉帧的主因之一；先收敛再防抖重排。
+            # 与 _on_lazy_scroll 的收敛逻辑保持一致，避免两处行为分叉。
+            if (self._fadeTimer.isActive() or self._fade_queue
+                    or self._batch_fade is not None):
+                self._cancel_fade_in()
+            # 位移动画必须无条件收敛：淡入已结束但位移仍在途时，上面的
+            # 条件不成立，若不收敛，卡片会停在插值中途被下一轮重排接管。
+            self._cancel_relayout_motion()
             self._relayoutTimer.start()
             self._sync_overlay_geometry()
         return super().eventFilter(obj, event)
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        if self._relayout_pending:
+            self._relayout_pending = False
+            # 延后到防抖窗口：与子类 showEvent 的首次扫描（singleShot(0)）
+            # 错开，避免同一帧里「扫描重建」与「尺寸重排」互相叠加。
+            self._relayoutTimer.start()
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
@@ -285,11 +357,180 @@ class GridCardContainer(QWidget):
         据此把内容高度压小 → 网格各行被强制压缩、卡片挤到错误位置；卡片
         稍后被显示后高度恢复、卡片又弹回原位——两帧之间的大幅位移就是
         「点刷新后卡片上下晃动」。淡入模式下 show 由 opacity=0 效果遮蔽，
-        不会闪现。``_relayout`` 摘挂回填的卡片（takeAt + setParent(None)
-        同样触发 hide）也全部经此入口恢复显示。
+        不会闪现。
+
+        注意：``_relayout``（即时页）**不走这里**——它摘布局项时不脱离
+        parent，卡片始终 visible，回填 addWidget 不迁移也就不需 show；
+        本入口仅供 ``_add_cards`` / ``_materialize_visible`` 等新建卡片路径。
         """
         self.gridLayout.addWidget(card, row, col)
         card.show()
+
+    def _visible_grid_cards(self) -> list:
+        """视口当前覆盖行内的已物化卡片（全屏重排后柔和过渡的作用域）。
+
+        只取视口上下各一行——全屏切换时真正被看到的就是这些卡片，
+        对它们挂 opacity 效果开销可控（几十张），视口外卡片保持原生绘制。
+        与懒加载的预载行数（上下各 2 行）刻意不同：过渡只需覆盖可见区。
+        """
+        cols = self._grid_cols
+        if not cols:
+            return []
+        stride = _ROW_H + _V_SPACING
+        y0 = self.scrollArea.verticalScrollBar().value()
+        y1 = y0 + self.scrollArea.viewport().height()
+        first = max(int(y0 // stride) - 1, 0)
+        last = int(y1 // stride) + 1
+        out = []
+        for i in range(self.gridLayout.count()):
+            item = self.gridLayout.itemAt(i)
+            w = item.widget()
+            if w is None or not w.isVisible():
+                continue
+            row = self.gridLayout.getItemPosition(i)[0]
+            if first <= row <= last:
+                out.append(w)
+        return out
+
+    def _snapshot_visible_geometry(self) -> dict:
+        """列数变化前快照视口附近卡片几何（FLIP 的 First）。
+
+        只取当前视口上下各一行：全屏切换时用户真正看到的就是这些卡片，
+        且其 QRect 与重排后同属 ``scrollContent`` 坐标系，可直接插值。
+        首次排布（``_grid_cols == 0``）返回空字典，不触发动画。
+
+        抓取前先收敛在途动画：业务主动重排（转换结束、增删卡片）可能撞在
+        上一轮位移播放中途，若直接快照会拿到插值半路的几何，新一轮动画
+        就会从「半路」倒退着起步。收敛后 First 始终是稳定几何。
+        """
+        if not self.relayout_motion or not self._grid_cols:
+            return {}
+        self._cancel_relayout_motion()
+        return {card: QRect(card.geometry())
+                for card in self._visible_grid_cards()}
+
+    def _play_relayout_motion(self, old_geo: dict):
+        """列数变化后的 FLIP 动画：Invert 回旧几何 → Play 插值到新几何。
+
+        ``old_geo`` 来自 ``_snapshot_visible_geometry()``；为空时（首次排布 /
+        动画关闭）退化为原来的硬切，不额外挂任何效果。
+
+        整批只用一个 ``QVariantAnimation``：视口几十张卡片若各挂一个
+        QPropertyAnimation，会在切换瞬间并发几十个动画抢事件循环——正是
+        全屏顿挫的成因。单动画逐帧批量刷 ``setGeometry``，帧开销只与可见
+        卡片数线性相关，与列表总量无关。
+        """
+        # 先统一收敛：在途错峰淡入 / 批量淡入 / 上一轮位移都要清干净，
+        # 否则两套效果叠加会留下半透明残留或停在半路的几何。
+        self._cancel_fade_in()
+        if not self.relayout_motion or not old_geo:
+            return
+        targets = self._visible_grid_cards()
+        if not targets:
+            return
+        pairs, newcomers = [], []
+        for card in targets:
+            end = QRect(card.geometry())
+            start = old_geo.get(card)
+            if start is None:
+                newcomers.append(card)      # 列数变化后新进入视口
+            elif start != end:
+                pairs.append((card, start, end))
+        if not pairs and not newcomers:
+            return
+        # 淡入只给「无旧几何」的卡片；有位移的卡片保持完全不透明，让移动
+        # 本身成为唯一视觉线索（叠加透明度会让画面发虚）。
+        fades = []
+        if self.fade_in and newcomers:
+            for card in newcomers:
+                try:
+                    effect = QGraphicsOpacityEffect(card)
+                    effect.setOpacity(_RELAYOUT_FADE_MIN)
+                    card.setGraphicsEffect(effect)
+                    card._fade_effect = effect
+                    card._fade_cancelled = False
+                    fades.append(card)
+                except RuntimeError:
+                    continue  # 卡片已被 Qt 销毁
+        if not pairs and not fades:
+            return
+        # Invert：在同一帧把参与位移的卡片放回旧几何，避免先闪一帧新布局。
+        self.scrollArea.setUpdatesEnabled(False)
+        try:
+            for card, start, _ in pairs:
+                try:
+                    card.setGeometry(start)
+                except RuntimeError:
+                    pass
+        finally:
+            self.scrollArea.setUpdatesEnabled(True)
+        pairs_ref, fades_ref = tuple(pairs), tuple(fades)
+        anim = QVariantAnimation(self)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setDuration(_RELAYOUT_MOVE_MS)
+        anim.setEasingCurve(_RELAYOUT_MOVE_EASING)
+        anim.valueChanged.connect(
+            lambda v, ps=pairs_ref, fs=fades_ref:
+                self._apply_relayout_frame(ps, fs, float(v))
+        )
+        anim.finished.connect(lambda: self._finish_relayout_motion(anim))
+        self._move_anim = (anim, pairs_ref, fades_ref)
+        anim.start()
+
+    def _apply_relayout_frame(self, pairs, fades, t: float):
+        """单帧：批量插值 x/y/w/h（列数变化会同时改变位置与列宽），
+        并同步补齐无旧几何卡片的淡入。"""
+        for card, start, end in pairs:
+            try:
+                card.setGeometry(QRect(
+                    round(start.x() + (end.x() - start.x()) * t),
+                    round(start.y() + (end.y() - start.y()) * t),
+                    round(start.width() + (end.width() - start.width()) * t),
+                    round(start.height() + (end.height() - start.height()) * t),
+                ))
+            except RuntimeError:
+                continue  # 卡片已被回收 / 销毁
+        if fades:
+            opacity = _RELAYOUT_FADE_MIN + (1.0 - _RELAYOUT_FADE_MIN) * t
+            for card in fades:
+                effect = getattr(card, "_fade_effect", None)
+                if effect is not None:
+                    try:
+                        effect.setOpacity(opacity)
+                    except RuntimeError:
+                        pass
+
+    def _settle_relayout_motion(self, pairs, fades):
+        """收敛到最终状态（动画跑完 / 被中止时共用）：精确落到目标几何
+        （消除插值取整误差），并卸载 newcomer 的透明度效果。"""
+        for card, _, end in pairs:
+            try:
+                card.setGeometry(end)
+            except RuntimeError:
+                pass
+        for card in fades:
+            self._restore_fade(card)
+
+    def _finish_relayout_motion(self, anim):
+        """动画跑完：交还布局所有权，卡片几何与 QGridLayout 完全一致。"""
+        if self._move_anim is None or self._move_anim[0] is not anim:
+            return
+        _, pairs, fades = self._move_anim
+        self._move_anim = None
+        self._settle_relayout_motion(pairs, fades)
+        anim.deleteLater()
+
+    def _cancel_relayout_motion(self):
+        """中止在途位移：连续全屏切换 / 滚动 / 重建时立即收敛，绝不让
+        卡片停在半路或带着半透明效果进入下一轮布局。"""
+        if self._move_anim is None:
+            return
+        anim, pairs, fades = self._move_anim
+        self._move_anim = None   # 先置空，防 stop() 触发 finished 重入
+        anim.stop()
+        self._settle_relayout_motion(pairs, fades)
+        anim.deleteLater()
 
     def _pin_content_height(self, rows: int):
         """把滚动内容高度主动拉到网格需求（rows 行 × 固定行高），只增不减。
@@ -314,17 +555,23 @@ class GridCardContainer(QWidget):
             self.scrollContent.resize(self.scrollContent.width(), h)
 
     def _relayout(self):
-        """按视口宽度计算列数并重排（宽度均分填满整行）。"""
+        """按视口宽度计算列数并重排（即时页 / 任务管理）。
+
+        两条性能约束，均由 400 卡 2→4 列基准实测得出（优化前 644~1019ms）：
+
+        1. **卡片不脱离 parent**：旧算法 ``takeAt + setParent(None) +
+           addWidget + show`` 的往返会触发 QFluentWidgets 样式事件过滤器
+           上万次（单次重排 10824 次），且每次 parent 迁移都会 hide/show。
+           改为只从布局摘除 item，卡片仍是 scrollContent 子控件、保持
+           visible，回填时 addWidget 不再迁移 parent，也就无需 show。
+           与 ``_relayout_lazy`` 已验证的「116ms → 21ms（5.6×）」同源。
+        2. **列数与卡片序列都没变就完全短路**：导航切页、滚动条显隐都会
+           发 viewport Resize，旧算法无条件全量摘挂一次；现在只刷新计数。
+        """
         if self.lazy_fill:
             self._relayout_lazy()
             return
         self._sort_cards()
-        # 摘除现有 item（不销毁 widget）
-        while self.gridLayout.count():
-            item = self.gridLayout.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.setParent(None)
         visible = self._visible_cards()
         # 可用宽 = 滚动区视口宽（视口已排除垂直滚动条宽度；页面左右边距在滚动区之外，
         # 网格内容与工具栏卡片左右对齐）
@@ -333,18 +580,46 @@ class GridCardContainer(QWidget):
         # 列数取偶：奇数列会在最右留单张卡片、左右不对称，观感差
         if cols > 1 and cols % 2:
             cols -= 1
-        for i, card in enumerate(visible):
-            self._grid_add_widget(card, i // cols, i % cols)
-        # 强制各列等宽：先复位旧列拉伸，再为当前所有列设相同 stretch，
-        # 避免个别卡片内容 sizeHint 偏大致使列宽不一致（如长文件名、不同徽章文本）
-        for col in range(max(self._grid_cols, cols)):
-            self.gridLayout.setColumnStretch(col, 0)
-        for col in range(cols):
-            self.gridLayout.setColumnStretch(col, 1)
-        self._grid_cols = cols
-        self.gridLayout.activate()
-        self._pin_content_height((len(visible) + cols - 1) // cols)
+        cols_changed = cols != self._grid_cols
+        seq = tuple(id(c) for c in visible)
+        if not cols_changed and seq == self._last_layout_seq:
+            self._update_count()
+            return
+        # FLIP First：摘布局之前先记下视口卡片的旧几何。首次排布
+        # （_grid_cols == 0）与渐进填充期间不快照——没有「上一帧」可移动。
+        old_geo = (self._snapshot_visible_geometry()
+                   if cols_changed and self._grid_cols and not self._filling
+                   else {})
+
+        self.scrollArea.setUpdatesEnabled(False)
+        try:
+            # 只摘布局项，不 setParent(None)：卡片保持 parent/visible，
+            # 避免 hide→show 往返与样式事件过滤器风暴。
+            while self.gridLayout.count():
+                self.gridLayout.takeAt(0)
+            for i, card in enumerate(visible):
+                self.gridLayout.addWidget(card, i // cols, i % cols)
+                if not card.isVisible():
+                    # 仅首次建卡（_make_card 的 parent 是页面本身，addWidget
+                    # 会迁移到 scrollContent 并 hide）才需要恢复显示。
+                    card.show()
+            # 强制各列等宽：先复位旧列拉伸，再为当前所有列设相同 stretch，
+            # 避免个别卡片内容 sizeHint 偏大致使列宽不一致（长文件名、徽章文本）
+            for col in range(max(self._grid_cols, cols)):
+                self.gridLayout.setColumnStretch(col, 0)
+            for col in range(cols):
+                self.gridLayout.setColumnStretch(col, 1)
+            self._grid_cols = cols
+            self.gridLayout.activate()
+            self._pin_content_height((len(visible) + cols - 1) // cols)
+        finally:
+            self.scrollArea.setUpdatesEnabled(True)
+        self._last_layout_seq = seq
         self._update_count()
+        # 全屏/缩放导致列数变化：几何已收敛到 Last，交给 FLIP 把卡片
+        # Invert 回旧位置再逐帧 Play 到新位置，替代原来的瞬间硬切。
+        if cols_changed and not self._filling and old_geo:
+            self._play_relayout_motion(old_geo)
 
     def _relayout_lazy(self):
         """懒加载重排：全部条目铺占位格（滚动条高度正确），已建卡片原位回填。
@@ -359,6 +634,7 @@ class GridCardContainer(QWidget):
         if cols > 1 and cols % 2:
             cols -= 1
         old_cols = self._grid_cols
+        cols_changed = cols != old_cols
         same = cols == old_cols and view == self._last_view
         self._grid_cols = cols
         if same:
@@ -366,6 +642,12 @@ class GridCardContainer(QWidget):
             self._materialize_visible()
             self._update_count()
             return
+        # FLIP First：_clear_grid() 会摘掉全部布局项，必须在此之前快照。
+        # 懒加载页只对「重排前后都仍是同一张卡片对象」的项做位移——
+        # 物化/回收换掉的卡片自动落入 newcomers 走淡入，不会张冠李戴。
+        old_geo = (self._snapshot_visible_geometry()
+                   if cols_changed and old_cols and not self._filling
+                   else {})
 
         self._view = view
         self._pos_of = {it: i for i, it in enumerate(view)}
@@ -399,6 +681,10 @@ class GridCardContainer(QWidget):
         self._last_view = list(view)
         self._materialize_visible()
         self._update_count()
+        # 物化已完成、几何收敛到 Last，再启动 FLIP 逐帧位移（两条重排
+        # 路径共用同一套动画机制，行为不分叉）。
+        if cols_changed and not self._filling and old_geo:
+            self._play_relayout_motion(old_geo)
 
     def _clear_grid(self):
         """摘除网格内全部 item（卡片保留 parent，占位格回收进池）。
@@ -444,7 +730,12 @@ class GridCardContainer(QWidget):
         第一张之外的卡片放进队列等节拍器。若清空队列时不卸载这些卡片的
         效果，它们会永久停在半透明（实测刷新重建后残留 7 张），滚动过去
         就能看到。队列与进行中的动画都必须逐一 restore。
+
+        列数切换的 FLIP 位移动画也在此统一收敛：重建 / 刷新 / 滚动都会
+        调用本方法，卡片必须先回到目标几何，否则下一轮布局会基于半路的
+        位置计算，出现错位或残留。
         """
+        self._cancel_relayout_motion()
         self._fadeTimer.stop()
         for card in self._fade_queue:
             self._restore_fade(card)
@@ -520,7 +811,7 @@ class GridCardContainer(QWidget):
             anim.setStartValue(0.0)
             anim.setEndValue(1.0)
             anim.setDuration(_FADE_SCROLL_MS)
-            anim.setEasingCurve(QEasingCurve.OutCubic)
+            anim.setEasingCurve(_FADE_EASING)
             anim.valueChanged.connect(
                 lambda v, cs=cards_ref: self._apply_batch_opacity(cs, v)
             )
@@ -658,7 +949,7 @@ class GridCardContainer(QWidget):
             anim.setDuration(_REPLAY_PULSE_MS)
             anim.setStartValue(_REPLAY_MIN_OPACITY)
             anim.setEndValue(1.0)
-            anim.setEasingCurve(QEasingCurve.OutCubic)
+            anim.setEasingCurve(_FADE_EASING)
             self._fade_anims[card] = anim
             anim.finished.connect(lambda c=card, a=anim: self._finish_fade(c, a))
             anim.start()
@@ -672,7 +963,7 @@ class GridCardContainer(QWidget):
         anim.setDuration(duration)
         anim.setStartValue(0.0)
         anim.setEndValue(1.0)
-        anim.setEasingCurve(QEasingCurve.OutCubic)
+        anim.setEasingCurve(_FADE_EASING)
         self._fade_anims[card] = anim
         anim.finished.connect(lambda c=card, a=anim: self._finish_fade(c, a))
         anim.start()
@@ -716,6 +1007,9 @@ class GridCardContainer(QWidget):
             # 视觉变化，直接让瀑布流卡片完全显示比叠加淡入更顺滑。
             if self._fadeTimer.isActive() or self._fade_queue:
                 self._cancel_fade_in()
+            # 滚动期间物化/回收会 activate() 布局，必须先把位移动画收敛，
+            # 否则布局会覆盖逐帧插值，或把停在半路的卡片重新排布。
+            self._cancel_relayout_motion()
             self._materialize_visible(stagger=False)
 
     def _materialize_visible(self, stagger: bool = True):

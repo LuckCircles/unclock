@@ -28,6 +28,7 @@ from ..common.decrypt_scanner import (
     list_encrypted_files,
 )
 from ..common.logger import logger
+from ..common.platform_icon import platform_icon
 from ..common.signal_bus import signalBus
 from ..common.utils import is_encrypted_file
 from ..components.grid_card_container import GridCardContainer
@@ -105,6 +106,9 @@ class TaskInterface(GridCardContainer):
         signalBus.paths_changed.connect(self._on_paths_changed)
         # 整批转换结束后统一重排一次，让已解密卡片沉底
         signalBus.conversion_finished.connect(self._on_conversion_finished)
+        # 主题 / 强调色切换：重绘仍显示默认音乐图标的左侧位（真实平台图标不受影响）
+        qconfig.themeChanged.connect(self._on_theme_changed_for_icon)
+        qconfig.themeColorChanged.connect(self._on_theme_changed_for_icon)
 
         # 启动不同步建卡：延后到事件循环首轮，并分批渐进填充——
         # 数百张卡的输入目录会把启动拖死数秒，现在窗口先出、卡片随后流式出现
@@ -121,7 +125,11 @@ class TaskInterface(GridCardContainer):
 
     # ------------------------------------------------------------ 基类钩子
     def _make_card(self, path: str) -> TaskCard:
-        card = TaskCard(path, self)
+        # 平台图标按后缀解析为官方 FluentIconBase 枚举；有对应平台显示 logo，
+        # 其余（明文等）传 None 显示默认音乐图标。其 path() 返回 :/ qrc 路径。
+        # 布局与已解密卡片一致（复用同一 44×44 左侧缩略图位）。
+        card = TaskCard(path, self, icon=True,
+                        platform_icon=platform_icon(path))
         # 重建期间继承转换服务接管的在途状态（解密中 / 失败），避免刷新把
         # 「解密中」冲回「待解密」；磁盘已有明文时仍以实际结果为准。
         preserved = self._preserve_status.get(path)
@@ -135,6 +143,15 @@ class TaskInterface(GridCardContainer):
             lambda pos, c=card: self._show_card_menu(c, pos)
         )
         return card
+
+    def _on_theme_changed_for_icon(self, *_):
+        """主题 / 强调色切换：重绘仍显示默认音乐图标的左侧位。
+
+        与已解密页 ``_on_theme_changed_for_cover`` 同理，只重绘占位图卡片，
+        真实平台 logo 由图库本身提供、不随主题变色。
+        """
+        for card in self._cards:
+            card.refresh_cover_placeholder()
 
     def _item_status(self, path: str) -> str:
         """预判条目状态（与 _make_card 判定同源），供重建前预排序使用。
