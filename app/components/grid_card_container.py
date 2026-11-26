@@ -51,7 +51,6 @@ from PySide6.QtCore import (
 )
 from PySide6.QtWidgets import (
     QGraphicsOpacityEffect,
-    QGridLayout,
     QHBoxLayout,
     QSizePolicy,
     QSpacerItem,
@@ -61,6 +60,7 @@ from PySide6.QtWidgets import (
 from qfluentwidgets import CardWidget, ScrollArea
 
 from .empty_status import EmptyStatusWidget
+from .flow_layout_ex import EvenFlowLayout, calc_cards_per_row
 
 # 网格布局参数：卡片最小宽 + 水平间距，用于计算列数。
 # 列数取偶（2/4/6…）并随窗口宽度自适应：视口每多容纳一列（≥_CARD_MIN_W）
@@ -71,11 +71,12 @@ _H_SPACING = 12
 # 懒加载按此计算视口覆盖的行范围
 _V_SPACING = 10
 _ROW_H = 64
-# 占位格高度：实测 QSpacerItem 取 _ROW_H(64) 时「纯占位格行」stride=64，
-# 而卡片行 stride=74 —— 混合布局不等距，滚动条高度随物化逐行漂移、卡片
-# 位置累积偏移（历史「上下晃动」根因之一）。取 64+10 让所有行统一 stride
-# 74，与 _pin_content_height() 的 rows*(_ROW_H+_V_SPACING) 计算一致。
-_SPACER_H = _ROW_H + _V_SPACING
+# 占位格 hint 高度：FlowLayout 的行高 = max(本行 item.sizeHint().height())，
+# 卡片固定高 64（TaskCard.setFixedHeight(64)），故占位格必须也是 64，所有
+# 行 stride 才统一为 64+10=74，滚动条高度不随物化逐行漂移、卡片位置不累积
+# 偏移（历史「上下晃动」根因）。与 _pin_content_height() 的
+# rows*(_ROW_H+_V_SPACING)-_V_SPACING 计算一致。
+_SPACER_H = _ROW_H
 # 视口外保留行数：超出 [视口-KEEP, 视口+KEEP] 的卡片回收为占位格。
 # 比 _LAZY_PRELOAD_ROWS(2) 大，避免小幅来回滚动反复建卡（单卡构建约 3.5ms）。
 _LAZY_KEEP_ROWS = 4
@@ -215,7 +216,10 @@ class GridCardContainer(QWidget):
         self.scrollContent = QWidget()
         self.scrollLayout = QVBoxLayout(self.scrollContent)
         self.scrollLayout.setContentsMargins(0, 0, 0, 0)
-        self.gridLayout = QGridLayout()
+        # 几何引擎：EvenFlowLayout（AdaptiveFlowLayout 偶数列变体）替换原
+        # QGridLayout。列数恒偶、卡片宽度按行均摊铺满整行（两侧无侧隙）、
+        # needAni=False（每卡一位移动画的模式已由基类单动画 FLIP 取代）。
+        self.gridLayout = EvenFlowLayout(card_min_width=_CARD_MIN_W)
         self.gridLayout.setContentsMargins(0, 0, 0, 0)
         self.gridLayout.setHorizontalSpacing(_H_SPACING)
         self.gridLayout.setVerticalSpacing(_V_SPACING)
@@ -348,8 +352,8 @@ class GridCardContainer(QWidget):
         self._sync_overlay_geometry()
 
     # ------------------------------------------------------------ 网格排布
-    def _grid_add_widget(self, card, row: int, col: int):
-        """卡片入格 + 立即显示。
+    def _grid_add_widget(self, card, pos: int):
+        """卡片入格（扁平索引）+ 立即显示。
 
         必须显式 show：``_make_card`` 建卡的 parent 是页面本身，addWidget
         时 Qt 会把卡片迁移到布局容器（scrollContent），**setParent 迁移
@@ -363,7 +367,7 @@ class GridCardContainer(QWidget):
         parent，卡片始终 visible，回填 addWidget 不迁移也就不需 show；
         本入口仅供 ``_add_cards`` / ``_materialize_visible`` 等新建卡片路径。
         """
-        self.gridLayout.addWidget(card, row, col)
+        self.gridLayout.insertWidget(pos, card)
         card.show()
 
     def _visible_grid_cards(self) -> list:
@@ -387,7 +391,7 @@ class GridCardContainer(QWidget):
             w = item.widget()
             if w is None or not w.isVisible():
                 continue
-            row = self.gridLayout.getItemPosition(i)[0]
+            row = i // cols
             if first <= row <= last:
                 out.append(w)
         return out
@@ -513,7 +517,7 @@ class GridCardContainer(QWidget):
             self._restore_fade(card)
 
     def _finish_relayout_motion(self, anim):
-        """动画跑完：交还布局所有权，卡片几何与 QGridLayout 完全一致。"""
+        """动画跑完：交还布局所有权，卡片几何与网格布局完全一致。"""
         if self._move_anim is None or self._move_anim[0] is not anim:
             return
         _, pairs, fades = self._move_anim
@@ -537,7 +541,7 @@ class GridCardContainer(QWidget):
 
         渐进填充/重建期间，QScrollArea 对 scrollContent 的 resize 是异步
         的（LayoutRequest 逐帧追赶），会出现「网格需求已涨、内容高度未涨」
-        的窗口——布局在这个不够的高度内激活，QGridLayout 会把各行强制
+        的窗口——布局在这个不够的高度内激活，会把各行强制
         压缩（实测行高 64 被压到 50~59），卡片超出格子相互叠压，视觉即
         「卡片挤压晃动」。这里主动把内容拉高到需求，布局激活时高度永远
         足够，压缩帧不再出现。
@@ -576,10 +580,9 @@ class GridCardContainer(QWidget):
         # 可用宽 = 滚动区视口宽（视口已排除垂直滚动条宽度；页面左右边距在滚动区之外，
         # 网格内容与工具栏卡片左右对齐）
         available = max(self.scrollArea.viewport().width(), 0)
-        cols = max(1, available // (_CARD_MIN_W + _H_SPACING))
-        # 列数取偶：奇数列会在最右留单张卡片、左右不对称，观感差
-        if cols > 1 and cols % 2:
-            cols -= 1
+        # 列数与 EvenFlowLayout._doLayout 共用 calc_cards_per_row，保证基类
+        # 以为的列数 == 布局实际摆出的列数（物化/回收行计算、FLIP 都依赖）
+        cols = calc_cards_per_row(available, _CARD_MIN_W, _H_SPACING)
         cols_changed = cols != self._grid_cols
         seq = tuple(id(c) for c in visible)
         if not cols_changed and seq == self._last_layout_seq:
@@ -593,22 +596,18 @@ class GridCardContainer(QWidget):
 
         self.scrollArea.setUpdatesEnabled(False)
         try:
-            # 只摘布局项，不 setParent(None)：卡片保持 parent/visible，
-            # 避免 hide→show 往返与样式事件过滤器风暴。
+            # 只摘布局项，不 setParent(None)：卡片保持 parent/visible，避免
+            # hide→show 往返与样式事件过滤器风暴。takeAt 已在 EvenFlowLayout
+            # 覆写为返回 QLayoutItem 且对占位格安全。
             while self.gridLayout.count():
                 self.gridLayout.takeAt(0)
             for i, card in enumerate(visible):
-                self.gridLayout.addWidget(card, i // cols, i % cols)
+                self.gridLayout.insertWidget(i, card)
                 if not card.isVisible():
-                    # 仅首次建卡（_make_card 的 parent 是页面本身，addWidget
+                    # 仅首次建卡（_make_card 的 parent 是页面本身，insertWidget
                     # 会迁移到 scrollContent 并 hide）才需要恢复显示。
                     card.show()
-            # 强制各列等宽：先复位旧列拉伸，再为当前所有列设相同 stretch，
-            # 避免个别卡片内容 sizeHint 偏大致使列宽不一致（长文件名、徽章文本）
-            for col in range(max(self._grid_cols, cols)):
-                self.gridLayout.setColumnStretch(col, 0)
-            for col in range(cols):
-                self.gridLayout.setColumnStretch(col, 1)
+            # EvenFlowLayout 按行均摊 cardWidth 铺满整行，无需 setColumnStretch
             self._grid_cols = cols
             self.gridLayout.activate()
             self._pin_content_height((len(visible) + cols - 1) // cols)
@@ -630,9 +629,7 @@ class GridCardContainer(QWidget):
         """
         view = self._lazy_filter()
         available = max(self.scrollArea.viewport().width(), 0)
-        cols = max(1, available // (_CARD_MIN_W + _H_SPACING))
-        if cols > 1 and cols % 2:
-            cols -= 1
+        cols = calc_cards_per_row(available, _CARD_MIN_W, _H_SPACING)
         old_cols = self._grid_cols
         cols_changed = cols != old_cols
         same = cols == old_cols and view == self._last_view
@@ -658,22 +655,19 @@ class GridCardContainer(QWidget):
             for i, item in enumerate(view):
                 card = self._card_cache.get(item)
                 if card is not None:
-                    # parent 未变：addWidget 不迁移、不 hide，故不 show
-                    self.gridLayout.addWidget(card, i // cols, i % cols)
+                    # parent 未变：insertWidget 不迁移、不 hide，故不 show
+                    self.gridLayout.insertWidget(i, card)
                     if not card.isVisible():
                         card.show()   # 仅恢复此前被筛掉而隐藏的卡片
                     placed.add(id(card))
                 else:
                     sp = self._new_spacer()
                     self._spacer_at[item] = sp
-                    self.gridLayout.addItem(sp, i // cols, i % cols)
+                    self.gridLayout.insertItem(i, sp)
             for card in detached:
                 if id(card) not in placed and card.isVisible():
                     card.hide()
-            for col in range(max(old_cols, cols)):
-                self.gridLayout.setColumnStretch(col, 0)
-            for col in range(cols):
-                self.gridLayout.setColumnStretch(col, 1)
+            # EvenFlowLayout 按行均摊铺满，无需 setColumnStretch
             self.gridLayout.activate()
             self._pin_content_height((len(view) + cols - 1) // cols)
         finally:
@@ -885,13 +879,14 @@ class GridCardContainer(QWidget):
         self._cancel_fade_in()
         self._fade_scheduled = 0
         y1 = self.scrollArea.viewport().height()
+        cols = self._grid_cols or 1
         rows = []
         for i in range(self.gridLayout.count()):
             item = self.gridLayout.itemAt(i)
             w = item.widget() if item is not None else None
             if w is None or not w.isVisible():
                 continue
-            row, col, _, _ = self.gridLayout.getItemPosition(i)
+            row, col = i // cols, i % cols
             if w.y() < y1 + _ROW_H:  # 首屏 + 一行余量，向下衔接自然
                 rows.append((row, col, w))
         rows.sort(key=lambda t: (t[0], t[1]))
@@ -1043,14 +1038,16 @@ class GridCardContainer(QWidget):
                 continue
             sp = self._spacer_at.pop(item, None)
             if sp is not None:
-                self.gridLayout.removeItem(sp)
-                self._spacer_pool.append(sp)   # 复用，回收时再取
+                # 布局索引 == _view 索引（物化/回收都在同索引原位替换），
+                # takeAt 已覆写为对占位格安全（原版 takeAt 对 QSpacerItem 崩溃）
+                removed = self.gridLayout.takeAt(pos)
+                self._spacer_pool.append(removed if removed is not None else sp)
             card = self._reuse_card(item)   # 优先复用回收卡片
             if card is None:
                 card = self._make_card(item)
             card._lazy_item = item  # 反向映射：移除时由卡片找回条目
             self._card_cache[item] = card
-            self._grid_add_widget(card, pos // cols, pos % cols)
+            self._grid_add_widget(card, pos)
             new_cards.append((pos, card))
             changed = True
         # 视口外卡片回收为占位格：常驻卡片数始终与可见范围相当
@@ -1115,7 +1112,8 @@ class GridCardContainer(QWidget):
             self._card_cache.pop(item, None)
             self._park_card(card)          # 隐藏入池，不销毁
             sp = self._new_spacer()
-            self.gridLayout.addItem(sp, pos // cols, pos % cols)
+            # removeWidget(card) 已把该索引摘空，insertItem(pos) 在同索引回填
+            self.gridLayout.insertItem(pos, sp)
             self._spacer_at[item] = sp
             recycled = True
         return recycled
@@ -1299,7 +1297,7 @@ class GridCardContainer(QWidget):
         if not self._fill_frozen:
             self._schedule_fade_in(chunk)
         for i, card in enumerate(chunk):
-            self._grid_add_widget(card, (start + i) // cols, (start + i) % cols)
+            self._grid_add_widget(card, start + i)
         # 每批补格后立即钉住内容最小高度：QScrollArea 的异步 resize 滞后于
         # 网格增长，追赶期间布局会在不够的高度内激活、把行高压扁（卡片叠压）
         self._pin_content_height((len(self._cards) + cols - 1) // cols)
