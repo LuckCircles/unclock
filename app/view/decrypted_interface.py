@@ -701,6 +701,12 @@ class DecryptedInterface(GridCardContainer):
             # 当前代次还在扫描中，稍后它自己的通知会再进本槽
             return
         (_gen, items, input_basenames, empty_msg, scan_error) = payload
+        vp = self.scrollArea.viewport()
+        logger.debug(
+            f"[scan_done] gen={_gen} items={len(items)} visible={self.isVisible()} "
+            f"filled_once={self._filled_once} vp={vp.width()}x{vp.height()} "
+            f"cols={self._grid_cols}"
+        )
         # 页面从未显示过时，隐藏视口只有 98×28：按它算列数只会建 1 列 /
         # 3 张卡，还会把首次切入的入场动画提前吃掉。丢弃这次结果，
         # 等 showEvent 用真实视口重新扫描（代次号继续串联，不残留在途）。

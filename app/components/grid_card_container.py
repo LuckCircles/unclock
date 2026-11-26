@@ -56,9 +56,11 @@ from PySide6.QtWidgets import (
     QSpacerItem,
     QVBoxLayout,
     QWidget,
+    QWidgetItem,
 )
 from qfluentwidgets import CardWidget, ScrollArea
 
+from ..common.logger import logger
 from .empty_status import EmptyStatusWidget
 from .flow_layout_ex import EvenFlowLayout, calc_cards_per_row
 
@@ -335,7 +337,19 @@ class GridCardContainer(QWidget):
             # 位移动画必须无条件收敛：淡入已结束但位移仍在途时，上面的
             # 条件不成立，若不收敛，卡片会停在插值中途被下一轮重排接管。
             self._cancel_relayout_motion()
-            self._relayoutTimer.start()
+            # 列数真变了必须立即同步重排：setWidgetResizable 下 QScrollArea
+            # 会主动用新宽度调 heightForWidth 重算内容高度（EvenFlowLayout
+            # 内部按新宽度算列数），但 self._grid_cols 原先要等防抖 80ms 才
+            # 更新。这 80ms 内物化/回收/可见性判断都按旧列数算行 → 卡片错位、
+            # 初始化看起来「无滚动条 / 滚不动」。列数没变时仍走防抖（same
+            # 分支会短路，零开销），合并拖拽缩放的连续 Resize。
+            vp_w = max(self.scrollArea.viewport().width(), 0)
+            new_cols = calc_cards_per_row(vp_w, _CARD_MIN_W, _H_SPACING)
+            if new_cols != self._grid_cols:
+                self._relayoutTimer.stop()
+                self._relayout()
+            else:
+                self._relayoutTimer.start()
             self._sync_overlay_geometry()
         return super().eventFilter(obj, event)
 
@@ -557,6 +571,13 @@ class GridCardContainer(QWidget):
         h = rows * (_ROW_H + _V_SPACING) - _V_SPACING if rows > 0 else 0
         if self.scrollContent.height() < h:
             self.scrollContent.resize(self.scrollContent.width(), h)
+        vp = self.scrollArea.viewport()
+        sb = self.scrollArea.verticalScrollBar()
+        logger.debug(
+            f"[pin] rows={rows} need_h={h} content={self.scrollContent.height()} "
+            f"vp={vp.width()}x{vp.height()} sb=({sb.minimum()},{sb.maximum()}) "
+            f"cols={self._grid_cols}"
+        )
 
     def _relayout(self):
         """按视口宽度计算列数并重排（即时页 / 任务管理）。
@@ -674,6 +695,12 @@ class GridCardContainer(QWidget):
             self.scrollArea.setUpdatesEnabled(True)
         self._last_view = list(view)
         self._materialize_visible()
+        sb = self.scrollArea.verticalScrollBar()
+        logger.debug(
+            f"[relayout_lazy] cols={cols} rows={(len(view)+cols-1)//cols} "
+            f"view={len(view)} sb=({sb.minimum()},{sb.maximum()}) "
+            f"cols_changed={cols_changed} filling={self._filling}"
+        )
         self._update_count()
         # 物化已完成、几何收敛到 Last，再启动 FLIP 逐帧位移（两条重排
         # 路径共用同一套动画机制，行为不分叉）。
@@ -1019,6 +1046,7 @@ class GridCardContainer(QWidget):
         """
         if not self._view or not self._grid_cols:
             return
+        t0 = time.perf_counter()
         cols = self._grid_cols
         stride = _ROW_H + _V_SPACING
         y0 = self.scrollArea.verticalScrollBar().value()
@@ -1036,27 +1064,34 @@ class GridCardContainer(QWidget):
             item = self._view[pos]
             if item in self._card_cache:
                 continue
-            sp = self._spacer_at.pop(item, None)
-            if sp is not None:
-                # 布局索引 == _view 索引（物化/回收都在同索引原位替换），
-                # takeAt 已覆写为对占位格安全（原版 takeAt 对 QSpacerItem 崩溃）
-                removed = self.gridLayout.takeAt(pos)
-                self._spacer_pool.append(removed if removed is not None else sp)
+            self._spacer_at.pop(item, None)
             card = self._reuse_card(item)   # 优先复用回收卡片
             if card is None:
                 card = self._make_card(item)
             card._lazy_item = item  # 反向映射：移除时由卡片找回条目
             self._card_cache[item] = card
-            self._grid_add_widget(card, pos)
+            # 原位替换：占位格→卡片，同索引同尺寸（64 高、列宽均分），
+            # replace_item 复用旧几何、不触发全量 _doLayout——这是滚动
+            # 卡顿的根因修复（原版 takeAt+insertWidget 每次都 O(n) 全量重排）。
+            old = self.gridLayout.replace_item(pos, QWidgetItem(card))
+            if old is not None:
+                self._spacer_pool.append(old)
+            # reparent（首次建卡）/ 回收复用都会让卡片处于隐藏态，必须显式 show
+            card.show()
             new_cards.append((pos, card))
             changed = True
         # 视口外卡片回收为占位格：常驻卡片数始终与可见范围相当
         recycled = self._recycle_offscreen(first_row, last_row)
         if changed or recycled:
-            # 动态 addWidget / removeWidget 会把布局置脏：物化与回收后都
-            # 立即收敛，保证任意时刻网格几何已是最终值（后续 LayoutRequest
-            # 零位移，避免「点刷新后卡片上下晃动」）。
+            # replace_item 通常不置脏（几何未变），activate 短路返回近乎零开销；
+            # 仅当旧几何无效（初始化铺格前）被标脏时才全量收敛，保证任意时刻
+            # 网格几何已是最终值（后续 LayoutRequest 零位移）。
             self.gridLayout.activate()
+            logger.debug(
+                f"[materialize] rows={first_row}-{last_row} changed={changed} "
+                f"recycled={recycled} new={len(new_cards)} cache={len(self._card_cache)} "
+                f"dirty={self.gridLayout._geo_dirty} dt={(time.perf_counter()-t0)*1000:.1f}ms"
+            )
             if not self._suppress_materialize_fade and new_cards:
                 # 几何收敛后再挂透明度效果：新建卡片错峰淡入。
                 # 顺序以「当前可见区域」为起点（区内仍自上而下），视口外上下
@@ -1108,12 +1143,12 @@ class GridCardContainer(QWidget):
             if keep_first <= row <= keep_last:
                 continue
             self._forget_fade(card)
-            self.gridLayout.removeWidget(card)
+            sp = self._new_spacer()
+            # 原位替换：卡片→占位格，同索引同尺寸，replace_item 复用旧几何、
+            # 不触发全量 _doLayout（滚动卡顿根因修复）。
+            self.gridLayout.replace_item(pos, sp)
             self._card_cache.pop(item, None)
             self._park_card(card)          # 隐藏入池，不销毁
-            sp = self._new_spacer()
-            # removeWidget(card) 已把该索引摘空，insertItem(pos) 在同索引回填
-            self.gridLayout.insertItem(pos, sp)
             self._spacer_at[item] = sp
             recycled = True
         return recycled

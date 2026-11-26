@@ -18,7 +18,7 @@
 （同公式、同取偶规则），保证基类以为的列数 == 布局实际摆出的列数。
 """
 from PySide6.QtCore import QPoint, QRect, QSize
-from PySide6.QtWidgets import QWidgetItem
+from PySide6.QtWidgets import QLayoutItem, QWidgetItem
 
 from qfluentwidgets import AdaptiveFlowLayout
 
@@ -47,6 +47,22 @@ class EvenFlowLayout(AdaptiveFlowLayout):
         super().__init__(parent, needAni=False, isTight=False)
         # 与基类 _CARD_MIN_W 对齐，保证列数公式一致
         self._widgetMinimumWidth = card_min_width
+        # 几何缓存：懒加载物化/回收是占位格↔卡片的同索引原位互换，两者
+        # 同高（64）同宽，目标矩形完全一致，无需每次都全量 _doLayout。
+        # 缓存最近一次真实布局（move=True）的 rect / 高度 / item 数，
+        # rect 与数量均未变且未被标记脏时直接短路返回，把滚动物化从
+        # O(n) 降到 O(k)（k=变化卡片数）。heightForWidth 纯查询单独缓存。
+        self._geo_dirty = True
+        self._last_layout_rect = QRect()
+        self._last_height = 0
+        self._last_count = -1
+        self._last_hfw_width = -1
+        self._last_hfw_height = 0
+
+    def invalidate(self):
+        """标记几何脏：下次 _doLayout 必须全量重算（数量变化/外部失效）。"""
+        self._geo_dirty = True
+        super().invalidate()
 
     def insertWidget(self, index, w):
         """按扁平索引插入控件。
@@ -65,11 +81,41 @@ class EvenFlowLayout(AdaptiveFlowLayout):
         self._onWidgetAdded(w, index)
 
     def _doLayout(self, rect: QRect, move: bool):
-        """复制父类几何算法，仅把 cardsPerRow 取偶（最小 2）。
+        """复制父类几何算法（cardsPerRow 取偶），并加几何缓存短路。
 
-        与父类逐行等价，只改第 277/279 行之后的列数取整，其余（cardWidth
-        均摊铺满、行高累加、move 分支因 needAni=False 走 setGeometry）保持不变。
+        懒加载滚动物化是占位格↔卡片的同索引原位互换：两者同高（64）同宽，
+        目标矩形完全一致，全量重算纯属浪费。这里缓存最近一次真实布局
+        （move=True）的 rect / 高度 / item 数——rect 与数量均未变、且未被
+        标记脏时直接短路返回，把滚动物化的 O(n) 全量遍历降到 O(1) 返回。
+        heightForWidth 是纯查询（move=False），不修改 widget 几何，单独
+        缓存宽度→高度，避免 QScrollArea 重复查询时反复遍历全部 item。
         """
+        n = len(self._items)
+        if move:
+            # 真实布局：rect 未变、未脏、item 数未变 → 几何已应用，直接复用
+            if (not self._geo_dirty and rect == self._last_layout_rect
+                    and n == self._last_count):
+                return self._last_height
+            total = self._compute_layout(rect, move=True)
+            self._last_layout_rect = QRect(rect)
+            self._last_count = n
+            self._last_height = total
+            self._geo_dirty = False
+            # 真实布局后高度即权威值，heightForWidth 同宽查询直接复用
+            self._last_hfw_width = rect.width()
+            self._last_hfw_height = total
+            return total
+        # heightForWidth 纯查询：宽度未变、未脏、数量未变 → 复用
+        if (not self._geo_dirty and rect.width() == self._last_hfw_width
+                and n == self._last_count):
+            return self._last_hfw_height
+        total = self._compute_layout(rect, move=False)
+        self._last_hfw_width = rect.width()
+        self._last_hfw_height = total
+        return total
+
+    def _compute_layout(self, rect: QRect, move: bool):
+        """实际几何计算（与父类逐行等价，仅 cardsPerRow 取偶 + 末列吃余像素）。"""
         aniRestart = False
         margin = self.contentsMargins()
         spaceX = self.horizontalSpacing()
@@ -133,6 +179,28 @@ class EvenFlowLayout(AdaptiveFlowLayout):
             self._aniGroup.start()
 
         return y + rowHeight + margin.bottom() - rect.y()
+
+    def replace_item(self, pos: int, new_item: QLayoutItem) -> QLayoutItem:
+        """原位替换 pos 处的 item，复用其几何，不触发全量重排。返回旧 item。
+
+        懒加载物化（占位格→卡片）与回收（卡片→占位格）是同索引互换：两者
+        同高同宽，目标矩形完全一致。直接替换 ``_items[pos]`` 并把新 item
+        设到旧几何，跳过 invalidate——避免每次滚动物化都走 O(n) 全量
+        ``_doLayout``（实测 1500 项单次 activate 约 21ms，超出一帧预算）。
+        仅当旧几何无效（尚未布局过，如初始化铺格前）时才标记脏，回退到
+        下次全量计算。新 widget 若父容器不对会先 reparent 到布局父容器。
+        """
+        old = self._items[pos]
+        geo = old.geometry()
+        w = new_item.widget()
+        if w is not None and w.parentWidget() is not self.parentWidget():
+            w.setParent(self.parentWidget())
+        self._items[pos] = new_item
+        if geo.width() > 0 and geo.height() > 0:
+            new_item.setGeometry(geo)
+        else:
+            self._geo_dirty = True
+        return old
 
     def takeAt(self, index: int):
         """安全移除并返回索引处的 QLayoutItem（含 QSpacerItem）。
