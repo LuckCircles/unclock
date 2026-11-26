@@ -21,6 +21,7 @@ from qfluentwidgets import (
 )
 
 from ..common.config import cfg
+from ..common.i18n import register_retranslate_hook
 from ..common.resource import image
 from ..common.signal_bus import signalBus
 from ..components.interface import Interface
@@ -96,6 +97,8 @@ class HomeInterface(Interface):
         )
         for card in (self.umCard, self.ffmpegCard, self.qmpcCard, self.umCliRsCard):
             card.set_detecting()
+        # 语言切换时重建四张卡的状态/官网提示（提示文案为动态拼装）
+        register_retranslate_hook(self._retranslate_card_tips)
 
         self.toolsTitle = StrongBodyLabel("工具检测", self)
         self.vLayout.addWidget(self.toolsTitle)
@@ -202,6 +205,11 @@ class HomeInterface(Interface):
         self.umCliRsCard.update_info(
             report.um_cli_rs.version, report.um_cli_rs.ready
         )
+
+    def _retranslate_card_tips(self):
+        """语言切换后重建四张工具卡的状态/官网提示。"""
+        for card in (self.umCard, self.ffmpegCard, self.qmpcCard, self.umCliRsCard):
+            card.refresh_tips()
 
     def _open_input_dir(self):
         self._open_directory(cfg.input_dir.value, "输入目录")

@@ -101,12 +101,18 @@ unclock/
 │   ├── qmpc-mmkv-使用教程.md
 │   └── 已解密列表-内嵌专辑封面可行性分析.md
 ├── app/
-│   ├── resource.qrc               # 图片资源清单（含 icon.svg；编译为 resource_rc.py）
-│   ├── resource_rc.py             # qrc 编译产物（:/img/ 访问）
-│   ├── resources/img/icon.svg     # 窗口图标源图；build.py 据此生成打包用多尺寸 ico
+│   ├── resource/
+│   │   ├── resource.qrc           # 图片资源清单（含 icon.svg；编译为 resource_rc.py）
+│   │   ├── resource_rc.py         # qrc 编译产物（:/img/ 访问）
+│   │   ├── img/                   # 图片资源；icon.svg 用于生成打包用多尺寸 ico
+│   │   └── i18n/
+│   │       ├── build_i18n.py      # ts/qm 生成脚本（中英互译文案字典）
+│   │       ├── zh_CN.ts / zh_CN.qm # 英文 → 中文（切回中文时使用）
+│   │       └── en_US.ts / en_US.qm # 中文 → 英文（英文模式使用）
 │   ├── common/                    # 基础设施层（不依赖任何 UI 层）
 │   │   ├── application.py          #   SingletonApplication（Windows 命名互斥体单实例）
-│   │   ├── config.py               #   QConfig + 全局 cfg + 转换选项元数据 + 主题选项重排
+│   │   ├── config.py               #   QConfig + 全局 cfg + 转换选项元数据 + 主题/语言选项
+│   │   ├── i18n.py                 #   语言切换：翻译器安装、文案拦截、动态重翻译
 │   │   ├── signal_bus.py           #   全局信号总线（解耦 view ↔ service）
 │   │   ├── logger.py               #   loguru 配置
 │   │   ├── resource.py             #   资源路径常量
@@ -129,14 +135,13 @@ unclock/
 │   │   ├── task_planner.py         #   工具路径解析、并行数规则、claim / lane 任务规划
 │   │   ├── rust_decrypt.py         #   um-cli-rs 官方流程：子命令映射 / -I 探测 / 密钥解析 / 落盘
 │   │   └── converter.py            #   UnlockMusicConverter：双引擎批量队列 + QProcess + 超时 + 事件广播
-│   ├── resources/img/              # 图片资源（qrc 引用）
 │   └── view/                      # 界面层（仅 MainWindow 持有 service 实例）
 │       ├── main_window.py          #   MSFluentWindow 主窗口 + SystemThemeListener 系统主题跟随
 │       ├── home_interface.py       #   首页（banner + 工具检测 + 路径卡片 + 启动按钮）
 │       ├── task_interface.py       #   任务管理（状态排序、拖入/右键/状态联动）
 │       ├── decrypted_interface.py  #   已解密（懒加载网格 + 封面/标签探测可见优先调度 + 归类 + 搜索 + 右键）
 │       ├── log_interface.py        #   运行日志（级别着色 + 清空）
-│       └── setting_interface.py    #   配置界面（外观 / 基础 / 转换 / 任务行为）
+│       └── setting_interface.py    #   配置界面（外观含语言 / 基础 / 转换 / 任务行为 / 编码）
 ├── pyproject.toml
 └── uv.lock
 ```

@@ -8,7 +8,7 @@
 
 与普通 FluentIcon（黑白 SVG、随主题换色）不同：平台 logo 是彩色 PNG，
 ``path()`` 忽略 theme 参数、始终返回同一路径，避免主题切换时被错误着色。
-所需图片经 ``app/resource.qrc`` 编译进 ``app/resource_rc.py``。
+所需图片经 ``app/resource/resource.qrc`` 编译进 ``app/resource/resource_rc.py``。
 """
 
 from enum import Enum

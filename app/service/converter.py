@@ -27,6 +27,14 @@ from ..common.config import (
     cfg,
 )
 from ..common.logger import logger
+from ..common.encoder_probe import (
+    AAC_CANDIDATES,
+    OGG_CANDIDATES,
+    encoding_args,
+    probe_encoders,
+    resolve_encoder,
+)
+from ..common.i18n import translate_ui
 from ..common.rust_decrypt import (
     RustEngineError,
     cleanup_temp,
@@ -113,6 +121,7 @@ class UnlockMusicConverter(QObject):
         self._ffmpeg_path = ""
         self._qmpc_path = ""
         self._rust_path = ""
+        self._encoding_args: dict[str, list[str]] = {}
         self._engine = "um"
         self._worker_limit = 1
         self._wire_signals()
@@ -160,6 +169,7 @@ class UnlockMusicConverter(QObject):
         self._um_path, self._ffmpeg_path, self._qmpc_path, self._rust_path = (
             um, ffmpeg, qmpc, rust
         )
+        self._apply_encoding_policy()
 
         self._ok_count = 0
         self._fail_count = 0
@@ -196,6 +206,27 @@ class UnlockMusicConverter(QObject):
             f"准备解密 {len(self._pending)} 个文件。", "info"
         )
         self._pump()
+
+    def _apply_encoding_policy(self):
+        """解析 AAC/OGG 编码器策略并留痕。
+
+        两条解密链路目前只做封装探测与元数据写入、不转码，所以生成的参数
+        暂不参与输出；配置与探测结果先落地，后续接入转码时直接取用。
+        """
+        available = probe_encoders(self._ffmpeg_path)
+        aac = resolve_encoder(str(cfg.aac_encoder.value), AAC_CANDIDATES, available)
+        ogg = resolve_encoder(str(cfg.ogg_encoder.value), OGG_CANDIDATES, available)
+        self._encoding_args = encoding_args(aac, bool(cfg.fdk_vbr.value), ogg)
+        detail = f"AAC={aac or '不可用'} / OGG={ogg or '不可用'}"
+        if aac is None or ogg is None:
+            signalBus.log_emitted.emit(
+                f"部分编码器不可用（{detail}），请检查 ffmpeg 路径或设置页选择。",
+                "warning",
+            )
+        signalBus.log_emitted.emit(
+            f"编码策略：{detail}（当前链路仅解密不转码，参数暂存）。", "info"
+        )
+        logger.info(f"编码策略: {detail}")
 
     def _preflight(self) -> tuple[str, str, str, str]:
         """解析所选引擎 + 辅助工具路径；所选引擎缺失即终止，其余仅告警。"""
@@ -321,6 +352,7 @@ class UnlockMusicConverter(QObject):
             plan = prepare_rust_job(
                 job.task.path,
                 job.task.basename,
+                str(cfg.temp_dir.value or ""),
             )
         except RustEngineError as exc:
             self._rust_failure(job, generation, str(exc))
@@ -454,6 +486,7 @@ class UnlockMusicConverter(QObject):
             args = decrypt_args_for(
                 subcmd, job.task.path, job.dest, info,
                 self._qmpc_path, self._rust_path,
+                str(cfg.temp_dir.value or ""),
             )
         except RustEngineError as exc:
             self._rust_failure(job, generation, str(exc))
@@ -562,7 +595,9 @@ class UnlockMusicConverter(QObject):
             else:
                 reason = f"{name} 解密失败（退出码 {exit_code}），已记录并跳过，继续后续文件。"
             signalBus.log_emitted.emit(reason, "error")
-            signalBus.toast_requested.emit(f"{name} 解密失败，已跳过并继续。", "error")
+            signalBus.toast_requested.emit(
+                f"{name} {translate_ui('解密失败，已跳过并继续。')}", "error"
+            )
             logger.warning(f"文件解密失败（跳过）: {name} 退出码={exit_code}")
 
         QTimer.singleShot(0, self._pump)

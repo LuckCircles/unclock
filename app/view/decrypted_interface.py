@@ -4,7 +4,9 @@
 按来源打标签：由本工具从加密输入解密产生 → 「已解密」（绿）；输出目录原本就有、
 不对应任何加密输入 → 「已添加」（黄）。只扫描常见音乐文件类型。
 支持：顶部分类下拉框（全部/已解密/已添加/歌手名/专辑名）与搜索栏过滤、
-右键卡片查看信息 / 播放音乐 / 删除文件（删除带确认）、刷新 / 打开目录。
+右键卡片查看信息 / 播放音乐 / 打开路径 / 删除文件（删除带确认）、
+刷新 / 打开目录。「打开路径」在文件管理器中打开文件所在目录并**自动
+选中该文件**（Windows ``explorer /select``），便于立即看到落盘位置。
 「保存封面」入口在**查看信息对话框底部右侧**（2026-11-23 起右键菜单不再
 提供）：一键导出到**音乐文件同目录**，不弹保存对话框；目标固定为同目录
 同名 ``.png``，重复保存直接覆盖、不加序号。保存成功走 ``toast_requested``
@@ -43,7 +45,7 @@ from ..common.decrypt_scanner import build_input_basenames, output_source_label
 from ..common.logger import logger
 from ..common.media_info import guess_artist_from_name, probe_audio_info, probe_media
 from ..common.signal_bus import signalBus
-from ..common.utils import is_music_file
+from ..common.utils import is_music_file, open_file_location
 from ..components.cover_thumb_cache import CoverThumbCache
 from ..components.file_info_dialog import FileInfoDialog
 from ..components.grid_card_container import GridCardContainer
@@ -247,7 +249,12 @@ class DecryptedInterface(GridCardContainer):
         self.searchEdit.setFixedWidth(240)
         # 分类下拉框：全部 / 已解密 / 已添加 / 歌手名 / 专辑名（后两项为归类排序）
         self.filterCombo = ComboBox(self)
-        self.filterCombo.addItems(["全部", "已解密", "已添加", "歌手名", "专辑名"])
+        # 显示文案会被翻译，筛选逻辑一律用 userData 里的中文键，避免英文化后失效
+        for text, key in (
+            ("全部", "全部"), ("已解密", "已解密"), ("已添加", "已添加"),
+            ("歌手名", "歌手名"), ("专辑名", "专辑名"),
+        ):
+            self.filterCombo.addItem(text, userData=key)
         self.filterCombo.setFixedWidth(112)
         self.btnRefresh = TransparentPushButton(FluentIcon.SYNC, "刷新列表", self)
         self.btnOpenDir = TransparentPushButton(FluentIcon.FOLDER, "打开目录", self)
@@ -336,7 +343,7 @@ class DecryptedInterface(GridCardContainer):
             cover=True,
         )
         card._source = label
-        # 右键菜单：查看信息 / 播放 / 删除（保存封面已移到信息对话框内）
+        # 右键菜单：查看信息 / 播放音乐 / 打开路径 / 删除（保存封面已移到信息对话框内）
         card.setContextMenuPolicy(Qt.CustomContextMenu)
         card.customContextMenuRequested.connect(
             lambda pos, c=card: self._show_card_menu(c, pos)
@@ -502,13 +509,16 @@ class DecryptedInterface(GridCardContainer):
         return None
 
     def _ensure_all_media(self):
-        """为所有条目补探测（切到归类时调用；已探测的命中缓存直接跳过）。
+        """为所有条目补探测（扫描完成后调用；已探测的命中缓存直接跳过）。
 
-        全量只按普通优先级排队：归类排序需要所有标签，但不必抢当前屏幕
-        的封面带宽——pump 永远先取 urgent 队列。
+        全量只按普通优先级排队：让封面最终全部加载完（也保证归类排序随
+        时可用），但不抢当前屏幕的带宽——pump 永远先取 urgent 队列，
+        屏幕内的条目由 _on_visible_items / _prioritize_visible_items 提权。
         """
         for it in self._items:
             self._ensure_media(it, pump=False)
+        # 再提权一次可见项：列表刚重建、物化钩子可能尚未触发时兜底，
+        # 确保「可见优先」不依赖钩子时序。
         self._prioritize_visible_items()
         self._pump_media()
 
@@ -545,7 +555,7 @@ class DecryptedInterface(GridCardContainer):
         if got:
             # 有线程空出：立即按当前优先级补喂，可见项始终先出图
             self._pump_media()
-            if self.filterCombo.currentText() in ("歌手名", "专辑名"):
+            if self._filter_key() in ("歌手名", "专辑名"):
                 self._tag_relayoutTimer.start()
 
     def _is_card_stale(self, card: TaskCard, item) -> bool:
@@ -571,9 +581,13 @@ class DecryptedInterface(GridCardContainer):
         tags = self._tags.get(item)
         return (tags.get(field) or "") if tags else ""
 
+    def _filter_key(self) -> str:
+        """筛选键（中文内部值），不受显示文案翻译影响。"""
+        return self.filterCombo.currentData() or "全部"
+
     def _on_filter_changed(self, *_):
         """切换分类：歌手名 / 专辑名需先确保标签探测，再按标签归类重排。"""
-        if self.filterCombo.currentText() in ("歌手名", "专辑名"):
+        if self._filter_key() in ("歌手名", "专辑名"):
             # 顺序关键：先重排 → 物化触发可见项提权并立即开跑，再补齐全量
             # 标签。反序会让千级全量任务先占满 2 个线程，当前屏幕的封面
             # 被压到队尾，屏幕上迟迟还是占位图。
@@ -591,7 +605,7 @@ class DecryptedInterface(GridCardContainer):
           组内保持原 mtime 倒序（Python 稳定排序 + 原始列表有序保证）。
         """
         q = self._filter.strip().lower()
-        cat = self.filterCombo.currentText()
+        cat = self._filter_key()
         tag_field = (
             "artist" if cat == "歌手名" else "album" if cat == "专辑名" else None
         )
@@ -734,7 +748,7 @@ class DecryptedInterface(GridCardContainer):
                         )
                         card._source = label
                 # 分类筛选依赖来源标签，筛选项可能变化，需重算 _view
-                if self.filterCombo.currentText() != "全部" or self._filter.strip():
+                if self._filter_key() != "全部" or self._filter.strip():
                     self._relayout_lazy()
             self._update_count()
             (self.replay_from_top if refresh else self.replay_fade_in)()
@@ -743,9 +757,10 @@ class DecryptedInterface(GridCardContainer):
         # 重建后排队项可能属于已被删掉的旧文件：清掉，别让它们挡住当前
         # 屏幕的封面（在途的两个任务跑完自然作废，无需也不能取消）
         self._prune_media_queue()
-        # 首次加载 / 列表条目变化后，若当前正处于标签归类则补探测新条目
-        if self.filterCombo.currentText() in ("歌手名", "专辑名"):
-            self._ensure_all_media()
+        # 扫描完成即启动后台全量补探测：封面最终全部加载完（归类排序也随时
+        # 可用），但当前屏幕的条目已由 _on_visible_items 提到 urgent 队首，
+        # 先出图、其余排队慢慢补——即「懒加载 + 可见优先 + 后台补齐」。
+        self._ensure_all_media()
 
     def _on_search(self, text):
         self._filter = text
@@ -764,7 +779,7 @@ class DecryptedInterface(GridCardContainer):
 
     # ------------------------------------------------------------ 右键菜单
     def _show_card_menu(self, card, pos):
-        """在卡片上弹右键菜单（查看信息 / 播放音乐 / 删除文件）。
+        """在卡片上弹右键菜单（查看信息 / 播放音乐 / 打开路径 / 删除文件）。
 
         2026-11-23 起「保存封面」不再放在这里：统一由「查看信息」对话框
         底部右侧的按钮触发，入口与封面预览集中在一处。
@@ -776,6 +791,9 @@ class DecryptedInterface(GridCardContainer):
         play_act = Action(FluentIcon.PLAY, "播放音乐")
         play_act.triggered.connect(lambda: self._play_file(card))
         menu.addAction(play_act)
+        loc_act = Action(FluentIcon.FOLDER, "打开路径")
+        loc_act.triggered.connect(lambda: self._open_file_location(card))
+        menu.addAction(loc_act)
         del_act = Action(FluentIcon.DELETE, "删除文件")
         del_act.triggered.connect(lambda: self._confirm_delete(card))
         menu.addAction(del_act)
@@ -837,6 +855,18 @@ class DecryptedInterface(GridCardContainer):
     def _play_file(self, card):
         """用系统默认播放器打开音乐文件。"""
         QDesktopServices.openUrl(QUrl.fromLocalFile(card.file_path))
+
+    def _open_file_location(self, card):
+        """在文件管理器中打开文件所在目录，并自动选中该文件。
+
+        定位能力下沉在 ``common.utils.open_file_location``（Windows 走 Shell
+        API ``SHOpenFolderAndSelectItems``，失败回退 explorer /select）；本层
+        只负责取路径与缺失提示。文件已被外部删除时不打开空窗口，直接 toast。
+        """
+        path = card.file_path
+        if not open_file_location(path):
+            name = os.path.basename(path)
+            signalBus.toast_requested.emit(f"文件不存在或已被移动: {name}", "warning")
 
     def _load_cover_bytes(self, path: str, mtime: float, card=None, item=None):
         """取封面原始图片字节（JPEG/PNG）：命中缓存零探测，MISS 现场提取一次并回填。

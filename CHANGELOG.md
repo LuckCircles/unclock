@@ -11,6 +11,111 @@
 > 「刷新 = 屏幕闪一次、卡片位置与内容均不变」的契约。新契约为
 > **「刷新后列表回到顶部，卡片从第一张开始自上而下逐张刷新」**。
 
+### 修复：「打开路径」含空格路径失效（2026-11-26）
+
+**现象**：文件路径含空格时，「打开路径」只打开了「文档」目录，没有定位到文件。
+
+**根因**：原实现 `Popen(["explorer", f"/select,{path}"])` 列表形式——subprocess 对含空格参数整体加引号，explorer 把 `/select,C:\…` 连引号一起当无效参数解析，退化成打开默认位置。
+
+**修复**：改为优先走 Shell API `SHOpenFolderAndSelectItems`（打开目录并真正高亮文件）：`ILCreateFromPathW` / `SHOpenFolderAndSelectItems` / `ILFree` 必须声明 64 位 argtypes/restype（PIDL 是指针，默认按 32 位 int 截断会访问违例——已实测踩坑）。explorer `/select` 仅作 API 失败兜底，且改为**字符串形式**（路径自带引号，不经 Popen 重新加引号）。
+
+| 文件 | 改动 |
+|---|---|
+| `app/view/decrypted_interface.py` | 新增 `_select_in_explorer()`（ctypes Shell API，含原型声明与异常回退）；`_open_file_location` 改为 API 优先 + explorer 字符串形式兜底 |
+
+**验证**：py_compile 通过；含空格+中文路径实测 `SHOpenFolderAndSelectItems` 返回 S_OK（资源管理器弹出且文件选中）；文件不存在 toast 分支回归通过。未打包。
+
+### 修复：首页目录卡 tooltip 漏翻（2026-11-26）
+
+**现象**：英文模式下「输入目录」「输出目录」卡片的 tooltip 仍为中文。
+
+**根因**：`PathCard` 构造时拼复合 HTML `f"<b>{title}</b><br/>点击在文件管理器中打开"`，整串未入词典，`translate_ui` 查表未命中。
+
+**修复**：`build_i18n.py` 按项目整串约定新增两条（269 → 271 条），qm 重生成 + qrc 重编译。语言切换回中文时经 `_retranslate_one` 反向还原。
+
+**验证**：py_compile 通过；离屏英文模式 tooltip 为 `<b>Input folder</b><br/>Click to open in File Explorer`，切回中文完整还原。已核对全项目其余 setToolTip 复合串均已有词条覆盖。
+
+### 变更：已解密页右键新增「打开路径」（2026-11-26）
+
+**需求**：右键菜单增加「打开路径」，打开文件所在目录并**自动定位选中该文件**（区别于工具栏「打开目录」只开目录不选中）。
+
+| 文件 | 改动 |
+|---|---|
+| `app/view/decrypted_interface.py` | 新增 `_open_file_location()`：Windows 走 `explorer /select,<路径>`（`normpath` 归一反斜杠，正斜杠会静默失败不选中）；文件不存在时 toast 提示不开空窗；非 Windows 回退打开父目录。右键菜单在「播放音乐」与「删除文件」之间插入「打开路径」（`FluentIcon.FOLDER`），模块与菜单 docstring 同步 |
+| `app/resource/i18n/build_i18n.py` | 新增词条「打开路径」→ "Open location"（268 → 269 条），ts/qm 重新生成 |
+| `app/resource/resource_rc.py` | qm 内容变化后用 `pyside6-rcc` 重编译 |
+
+**验证（源码级，未执行任何 Nuitka 打包）**：py_compile 通过；离屏实例化调用 `_open_file_location` 真实文件成功（explorer 已弹出）；不存在文件走 toast 分支确认；i18n 生成 269 条 finished。
+
+### 变更：资源目录整理 + 中英文切换（2026-11-26）
+
+**需求**：qrc 与编译产物移入 resource 文件夹；新建 i18n 存放 ts/qm；外观设置增加「语言：中文 / 英文 / 自动」。
+
+**补全轮（同日，修复截图反馈的漏翻）**：词典 193 → 268 条。修复点：
+- 首页/任务页计数（「已解密 3 · 共 4」等）：按状态词组合程序化生成全部模板（数字归一后查表），中英双向可还原；
+- 转换设置六个选项卡标题与「对应参数…」提示、FFmpeg 编码器提示：构建时经 `translate_ui` 拼装 + `register_retranslate_hook` 语言切换重建（`setting_interface._retranslate_dynamic_texts`）；
+- 首页工具卡「已就绪/缺失/官网」Fluent 提示：`version_card.refresh_tips()` + home 注册重建回调；
+- 工具检测日志（「工具监测 um.exe: …（就绪 / 命令行 -v）」）：`tool_detector` 构建时翻译片段，来源前缀「命令行」单独处理；
+- 运行日志页显示时对数字模板消息查表翻译（`log_interface._on_log`），含路径/版本号的消息未命中模板原样保留；
+- 「删除完成」按钮、主窗口解密流程日志与 toast、`关闭`→Close（对话框按钮）等散补。
+
+| 文件 | 改动 |
+|---|---|
+| `app/resource/` | 新增目录，承接原 `app/resource.qrc`、`app/resource_rc.py` 与 `resources/img/`；qrc 路径改为相对 `img/` 并重编译，`app/__init__.py` 改为 `from .resource import resource_rc` |
+| `app/resource/i18n/` | 新增 `build_i18n.py`（193 条中英互译字典 + ts/qm 生成）、`zh_CN.ts/.qm`、`en_US.ts/.qm`；两种语言互为反向映射，任一时刻只装一个 QTranslator |
+| `app/resource/resource.qrc` | qm 编入 qrc：新增 `/i18n` 前缀资源段（`:/i18n/en_US.qm`、`:/i18n/zh_CN.qm`），已用 `pyside6-rcc` 重编译 |
+| `app/common/i18n.py` | 新增：解析自动/中文/英文、安装翻译器、拦截 `setText` / `setToolTip` / `setWindowTitle` / 下拉项设置、切换后遍历控件重翻译；新窗口 Show 时补翻译。qm 从 qrc 资源加载（`:/i18n/*.qm`），并按 QFluentWidgets 官方 i18n 方案加装 `FluentTranslator` 翻译库内置文案 |
+| `app/common/config.py` | 新增 `language`（`中文 / 英文 / 自动`，默认自动） |
+| `app/view/setting_interface.py` | 外观组新增「语言」下拉卡，配置变化即时调用 `apply_language()` |
+| `app/view/decrypted_interface.py` | 筛选下拉改用 `userData` 保存中文键，界面英文化后归类/筛选逻辑不变 |
+| `build.py` | 图标、qrc 与 i18n 路径统一到 `app/resource/`；预检要求两个 qm（qrc 编译源）；qm 已入 qrc，打包命令不再内嵌松散 qm 数据文件 |
+| `README.md` | 目录结构同步 |
+
+**验证（源码级，未执行任何 Nuitka 打包）**：py_compile 通过；`:/i18n/*.qm` 资源加载成功；离屏主窗口英文标题 `Music Unlock Tool`、中文标题「音乐解锁工具」；设置页语言下拉三项顺序与配置一致；英文模式已知文案未翻译项 0；筛选英文化后 `itemData` 仍为中文键；qrc 资源全部可加载；跨层违规 0；`build_command()` 不再含松散 qm；`config.json` 已备份恢复。
+
+### 变更：设置页开关文案中文化（2026-11-26）
+
+- `app/view/setting_interface.py`：新增 `ChineseSwitchSettingCard`，覆盖 `setValue` 在状态同步后重设 `开/关`。根因是 QFluentWidgets 的 `SwitchSettingCard.setValue()` 会强制 `setText(On/Off)`，仅构造时设置会在首次切换后失效。
+- 影响「并行转换」「覆盖已转换」「FDK 编码器：使用动态码率」三个开关；验证初始/开启/关闭三态均显示中文，离屏主窗口正常。
+
+### 变更：临时目录选择 + 封面「可见优先 + 后台全量」（2026-11-26）
+
+**需求**：参考官方 `um-conv` 的 `tempDir` 设置增加临时目录选择；封面懒加载要保证当前显示的歌曲先出图、其余在后台补齐。
+
+| 文件 | 改动 |
+|---|---|
+| `app/common/config.py` | 新增 `temp_dir`（默认空 = 系统临时目录） |
+| `app/view/setting_interface.py` | 「基础设置」新增「临时目录」选择卡（Fluent ToolTip：转换产生的中间文件会保存在这里）与选择槽 |
+| `app/common/rust_decrypt.py` | 新增 `resolve_temp_root()`；`prepare_rust_job` / `decrypt_args_for` / `_kgm_v5_key` 支持 `temp_dir`，在指定根目录下建 `umrs-` 子目录；无效/不可写目录回退系统临时目录，不让整批解密失败 |
+| `app/service/converter.py` | 把 `cfg.temp_dir` 贯穿到任务准备与 KGM 密钥解析两处调用；`um` 引擎链路不变 |
+| `app/view/decrypted_interface.py` | 扫描完成即启动后台全量补探测（此前仅归类分类触发）；可见项仍由 `_on_visible_items` / `_prioritize_visible_items` 提到 urgent 队首，`_ensure_all_media` 再兜底提权一次，不依赖钩子时序 |
+
+**官方设计依据**：`um-conv` 的 `Settings.tempDir`（AdvancedSettingsSection 的 `DirectoryPathField`，hint「转换产生的中间文件会保存在这里。」）；官方前端无封面画廊逻辑，封面部分是本项目自身设计。
+
+**验证（源码级，未执行打包命令）**：
+- 临时目录：空/不存在路径返回 None；有效目录下 `umrs-` 子目录与解密 dest 均落在其中；不可写目录回退系统临时目录；converter `_prepare_job` 实测 `job.tmp_dir` / `job.dest` 均在自定义目录下。
+- 封面调度：10 条目实测，可见 song7/song8 在 urgent 队首，其余 8 个进 normal；取件顺序为可见两项优先，全量 10 项均已排队。
+- py_compile 通过；跨层依赖违规 0；离屏主窗口标题「音乐解锁工具」、设置页临时目录卡、已解密页实例化均正常；`config.json` 已备份恢复。
+
+### 变更：并行数量与编码器设置补齐界面（2026-11-26）
+
+**需求**：把官方 GUI 的「并行数量」和「编码」设置项加进设置页；exe 路径选择保持互不互斥。
+
+| 文件 | 改动 |
+|---|---|
+| `app/common/config.py` | 新增 `aac_encoder` / `fdk_vbr` / `ogg_encoder`；并行两项注释改为设置页可调 |
+| `app/common/encoder_probe.py`（新增） | `ffmpeg -encoders` 探测并按路径缓存；显式选择校验 + 自动降级（AAC: libfdk_aac→aac，OGG: libopus→libvorbis）；生成编码参数（FDK VBR 5、AAC/Opus 192k、Vorbis q6） |
+| `app/service/converter.py` | preflight 后解析编码策略并写入运行日志；`um` / `um-cli-rs` 解密参数与对外信号不变 |
+| `app/view/setting_interface.py` | 新增 `SpinBoxSettingCard`（Fluent SpinBox，-1..256）；「任务行为」加并行开关与数量输入；新增「编码设置」组（FFmpeg 探测提示、AAC 下拉、FDK VBR 开关、OGG 下拉），ffmpeg 路径切换后自动重探 |
+
+**边界（如实标注）**：当前两条解密链路只做封装探测与元数据写入，**不转码**。编码器选择不会改变解密输出；此处先落地配置、探测与参数生成，供后续接入转码直接取用。
+
+**验证（源码级，未执行打包命令）**：
+- 真实 ffmpeg 8.1.3-Jellyfin 探测到 `libfdk_aac aac libopus libvorbis`；自动降级取 FDK / Opus；AAC 项填 opus 被拒（跨类校验生效）。
+- 离屏设置页：并行开关默认关、数字框范围 -1..256 且值 0、AAC/OGG 下拉项与配置顺序一致、FDK VBR 默认开、提示文案正确。
+- converter 解析出 `['-c:a', 'libfdk_aac', '-vbr', '5']` 与 `['-c:a', 'libopus', '-vbr', 'on', '-b:a', '192k']`。
+- `py_compile` 通过；跨层依赖违规 0（`MainWindow` 持有 service 为既有例外）；离屏主窗口标题「音乐解锁工具」；测试写入的 `config.json` 已按原内容恢复。
+
 ### 变更：新增解密引擎选择（um / um-cli-rs）与三份工具文档（2026-11-26）
 
 **需求**：设置页增加解密工具选择；选 `um-cli-rs` 时按官方工具流程解密，选 `um` 时链路不变；在 `docs/` 生成除 ffmpeg 外三个工具的使用文档。

@@ -1,0 +1,21 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+    <qresource prefix="/img">
+        <file alias="interface.png">img/interface.png</file>
+        <file alias="um.png">img/um.png</file>
+        <file alias="ffmpeg.png">img/ffmpeg.png</file>
+        <file alias="qmpc.png">img/qmpc.png</file>
+        <file alias="task_complete.png">img/task_complete.png</file>
+        <file alias="icon.svg">img/icon.svg</file>
+        <file alias="QQMusic.png">img/QQMusic.png</file>
+        <file alias="WangYiYun_Music.png">img/WangYiYun_Music.png</file>
+        <file alias="KuGou_Music.png">img/KuGou_Music.png</file>
+        <file alias="KuWo_Music.png">img/KuWo_Music.png</file>
+        <file alias="XM_Music.png">img/XM_Music.png</file>
+        <file alias="QiShui_Music.png">img/QiShui_Music.png</file>
+    </qresource>
+    <qresource prefix="/i18n">
+        <file alias="en_US.qm">i18n/en_US.qm</file>
+        <file alias="zh_CN.qm">i18n/zh_CN.qm</file>
+    </qresource>
+</RCC>

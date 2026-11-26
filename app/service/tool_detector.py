@@ -14,6 +14,7 @@ from typing import Callable
 from PySide6.QtCore import QObject, QRunnable, QThreadPool
 
 from ..common.config import cfg
+from ..common.i18n import translate_ui
 from ..common.logger import logger
 from ..common.signal_bus import signalBus
 from ..common.utils import decode_process_output
@@ -83,7 +84,7 @@ class ToolDetector(QObject):
         super().__init__(parent)
 
     def detect(self):
-        logger.info("开始工具链自动检测")
+        logger.info(translate_ui("开始工具链自动检测"))
         report = ToolsReport(
             um=self._check_um(),
             ffmpeg=self._check_ffmpeg(),
@@ -91,10 +92,15 @@ class ToolDetector(QObject):
             um_cli_rs=self._check_um_cli_rs(),
         )
         logger.info(
-            f"工具链检测完成: um={report.um.version}({'就绪' if report.um.ready else '缺失'}) "
-            f"ffmpeg={report.ffmpeg.version}({'就绪' if report.ffmpeg.ready else '缺失'}) "
-            f"qmpc={report.qmpc.version}({'就绪' if report.qmpc.ready else '缺失'}) "
-            f"um_cli_rs={report.um_cli_rs.version}({'就绪' if report.um_cli_rs.ready else '缺失'})"
+            f"{translate_ui('工具链检测完成:')} "
+            f"um={translate_ui(report.um.version)}"
+            f"({translate_ui('就绪' if report.um.ready else '缺失')}) "
+            f"ffmpeg={translate_ui(report.ffmpeg.version)}"
+            f"({translate_ui('就绪' if report.ffmpeg.ready else '缺失')}) "
+            f"qmpc={translate_ui(report.qmpc.version)}"
+            f"({translate_ui('就绪' if report.qmpc.ready else '缺失')}) "
+            f"um_cli_rs={translate_ui(report.um_cli_rs.version)}"
+            f"({translate_ui('就绪' if report.um_cli_rs.ready else '缺失')})"
         )
         # 工具监测情况同步到运行日志页（每个 exe 一行，附版本来源）
         for name, info in (
@@ -103,13 +109,20 @@ class ToolDetector(QObject):
             ("qmpc-mmkv-cli.exe", report.qmpc),
             ("um_cli_rs.exe", report.um_cli_rs),
         ):
-            source = f" / {info.source}" if info.source else ""
+            source = f" / {self._source_text(info.source)}" if info.source else ""
             signalBus.log_emitted.emit(
-                f"工具监测 {name}: {info.version} "
-                f"({'就绪' if info.ready else '缺失'}{source})",
+                f"{translate_ui('工具监测')} {name}: {translate_ui(info.version)} "
+                f"({translate_ui('就绪' if info.ready else '缺失')}{source})",
                 "info",
             )
         signalBus.tools_detected.emit(report)
+
+    @staticmethod
+    def _source_text(source: str) -> str:
+        """翻译版本来源；「命令行 -v」等带后缀的变体只翻译前缀。"""
+        if source.startswith("命令行"):
+            return f"{translate_ui('命令行')}{source[len('命令行'):]}"
+        return translate_ui(source)
 
     def detect_async(self):
         """后台线程池执行检测：不占用启动关键路径，结果经信号总线异步更新界面。"""

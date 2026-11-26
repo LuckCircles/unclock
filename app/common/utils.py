@@ -1,12 +1,15 @@
 # coding: utf-8
 """通用工具：受支持格式判定、路径压缩、文件大小格式化、进程输出解析。"""
 
+import ctypes
 import json
 import os
 import re
 import subprocess
 import sys
 from pathlib import Path
+
+from .logger import logger
 
 # 受 Unlock Music 支持的文件后缀集合
 # 来源：um v0.2.20 `um --supported-ext`（运行时可用该命令动态核对）
@@ -187,20 +190,64 @@ def simplify_process_line(line: str):
     return text, "info"
 
 
+def _select_in_explorer(path: str) -> bool:
+    """Shell API 定位：打开目录窗口并选中指定文件，成功返回 True。
+
+    64 位 Python 下必须声明 argtypes/restype——否则 PIDL 指针被默认
+    截断成 32 位 int，``SHOpenFolderAndSelectItems`` 会访问违例。
+    本线程未初始化 COM 时补 ``CoInitialize``（已初始化返回 S_FALSE，无害）。
+    """
+    from ctypes import wintypes
+
+    try:
+        ctypes.oledll.ole32.CoInitialize(None)
+        shell32 = ctypes.windll.shell32
+        shell32.ILCreateFromPathW.argtypes = [wintypes.LPCWSTR]
+        shell32.ILCreateFromPathW.restype = ctypes.c_void_p
+        shell32.SHOpenFolderAndSelectItems.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_uint,
+            ctypes.c_void_p,
+            ctypes.c_uint,
+        ]
+        shell32.SHOpenFolderAndSelectItems.restype = ctypes.HRESULT
+        shell32.ILFree.argtypes = [ctypes.c_void_p]
+    except Exception as exc:  # noqa: BLE001 原型声明失败（非 Windows 等）
+        logger.warning(f"Shell API 原型声明失败，回退 explorer /select: {exc}")
+        return False
+
+    pidl = shell32.ILCreateFromPathW(path)
+    if not pidl:
+        return False
+    try:
+        return shell32.SHOpenFolderAndSelectItems(pidl, 0, None, 0) == 0
+    except Exception as exc:  # noqa: BLE001 API 不可用时回退 explorer
+        logger.warning(f"SHOpenFolderAndSelectItems 失败，回退 explorer /select: {exc}")
+        return False
+    finally:
+        shell32.ILFree(pidl)
+
+
 def open_file_location(path: str) -> bool:
     """在文件管理器中打开文件所在目录并选中该文件（跨平台）。
 
-    Windows：``explorer /select,"path"``（选中文件）；macOS：``open -R``；
-    Linux：退化为打开所在目录（``xdg-open``，多数文件管理器不支持选中参数）。
+    Windows 优先走 Shell API ``SHOpenFolderAndSelectItems``：打开目标目录并
+    **真正高亮该文件**。``Popen(["explorer", "/select,…"])`` 列表形式在路径含
+    空格时会被 subprocess 整体加引号，explorer 解析失败退化成只开「文档」，
+    故 explorer 仅作 API 失败兜底（字符串形式，路径独立加引号）。
+    macOS：``open -R``；Linux 退化为打开所在目录（``xdg-open``）。
     路径不存在时返回 False，调用方据此给出提示。仅使用标准库，不依赖 UI 层。
     """
     if not path or not os.path.exists(path):
         return False
-    folder = os.path.dirname(os.path.abspath(path))
+    full = os.path.normpath(os.path.abspath(path))
+    folder = os.path.dirname(full)
     try:
-        if sys.platform == "win32":
-            # /select, 后跟完整路径；explorer 忽略 -- 直接用 Popen 避免阻塞
-            subprocess.Popen(["explorer", "/select,", os.path.abspath(path)])
+        if sys.platform.startswith("win"):
+            if _select_in_explorer(full):
+                return True
+            # 兜底：字符串形式不经 Popen 重新加引号，路径部分自带引号
+            subprocess.Popen(f'explorer /select,"{full}"')
         elif sys.platform == "darwin":
             subprocess.Popen(["open", "-R", path])
         else:

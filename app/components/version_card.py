@@ -12,6 +12,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from ..common.i18n import translate_ui
 from qfluentwidgets import (
     CaptionLabel,
     CardWidget,
@@ -100,12 +102,12 @@ class VersionCard(CardWidget):
         self._tip_filters = [
             _fluent_tip(
                 self.readyBadge,
-                f"<b>{escape(title)} 已就绪</b><br/>检测通过，可正常参与解密",
+                self._status_tip("已就绪", "检测通过，可正常参与解密"),
                 ToolTipPosition.TOP,
             ),
             _fluent_tip(
                 self.missBadge,
-                f"<b>{escape(title)} 缺失</b><br/>请检查工具文件，或在设置界面重新指定路径",
+                self._status_tip("缺失", "请检查工具文件，或在设置界面重新指定路径"),
                 ToolTipPosition.TOP,
             ),
         ]
@@ -130,11 +132,7 @@ class VersionCard(CardWidget):
         self.shareButton.setCursor(Qt.PointingHandCursor)
         share_tip = ""
         if homepage:
-            share_tip = (
-                f"<b>{escape(title)} · 官方网站</b><br/>"
-                f"{escape(homepage)}<br/>"
-                "点击在默认浏览器中打开"
-            )
+            share_tip = self._share_tip()
         self.shareButton.setVisible(bool(homepage))
         self.shareButton.clicked.connect(self._on_share_clicked)
         self._tip_filters.append(
@@ -160,6 +158,30 @@ class VersionCard(CardWidget):
         # 初始 neutral：后台检测结果到达前两个徽章都隐藏（避免启动瞬间闪 MISS）
         self.readyBadge.setVisible(False)
         self.missBadge.setVisible(False)
+
+    # ===== 提示文案（构建时经 translate_ui 翻译；语言切换后由 refresh_tips 重建） =====
+    def _status_tip(self, head: str, body: str) -> str:
+        """徽章状态提示：标题含工具名，无法整句查表，只能构建时拼装。"""
+        return (
+            f"<b>{escape(self.base_title)} {translate_ui(head)}</b><br/>"
+            f"{translate_ui(body)}"
+        )
+
+    def _share_tip(self) -> str:
+        return (
+            f"<b>{escape(self.base_title)} · {translate_ui('官方网站')}</b><br/>"
+            f"{escape(self.homepage)}<br/>"
+            f"{translate_ui('点击在默认浏览器中打开')}"
+        )
+
+    def refresh_tips(self):
+        """语言切换后重建三处 Fluent 提示（ToolTipFilter 动态读取 toolTip）。"""
+        self.readyBadge.setToolTip(self._status_tip("已就绪", "检测通过，可正常参与解密"))
+        self.missBadge.setToolTip(
+            self._status_tip("缺失", "请检查工具文件，或在设置界面重新指定路径")
+        )
+        if self.homepage:
+            self.shareButton.setToolTip(self._share_tip())
 
     def update_info(self, version: str, ready: bool = True):
         value = version

@@ -73,16 +73,40 @@ def supported_formats() -> tuple[str, ...]:
     return (".ncm", *_KGM_SUFFIXES, ".kwm", *_QMC2_SUFFIXES)
 
 
-def prepare_rust_job(path: str, basename: str) -> dict:
+def resolve_temp_root(temp_dir: str = "") -> str | None:
+    """返回可用的临时根目录；无效（空/不存在/非目录/无写权限）返回 None。
+
+    None 让调用方回退 ``tempfile`` 的系统临时目录——用户指定的盘可能掉线，
+    解密链不能因此整体失败。借鉴官方 um-conv 的 ``tempDir`` 设置语义。
+    """
+    if not temp_dir:
+        return None
+    try:
+        root = Path(temp_dir)
+        if not root.is_dir():
+            return None
+        # 真正的可写探测放在创建子目录时（mkdtemp 失败会抛 OSError）
+        return str(root)
+    except OSError:
+        return None
+
+
+def prepare_rust_job(path: str, basename: str, temp_dir: str = "") -> dict:
     """为一个任务准备临时目录、输出路径与首阶段命令。
 
     返回的 ``stage`` 为 ``decrypt``（NCM 可直接解密）或 ``probe``（先 ``-I``）。
+    ``temp_dir`` 是用户指定的临时根目录；无效时回退系统临时目录。
     """
     subcmd = subcommand_for(path)
     if subcmd is None:
         raise RustEngineError(f"um-cli-rs 不支持该文件格式：{Path(path).name}")
 
-    tmp_dir = Path(tempfile.mkdtemp(prefix="umrs-"))
+    root = resolve_temp_root(temp_dir)
+    try:
+        tmp_dir = Path(tempfile.mkdtemp(prefix="umrs-", dir=root))
+    except OSError:
+        # 指定目录不可写 / 中途掉线：回退系统临时目录，不让整批解密失败
+        tmp_dir = Path(tempfile.mkdtemp(prefix="umrs-"))
     dest = tmp_dir / f"{basename}.decrypted"
     sidecars: tuple[str, ...] = ()
     if subcmd == "ncm":
@@ -128,6 +152,7 @@ def decrypt_args_for(
     info: dict,
     qmpc_path: str,
     rust_path: str,
+    temp_dir: str = "",
 ) -> list[str]:
     """根据探测结果构造第二阶段解密命令（官方 -I → --ekey → --output）。"""
     if subcommand == "qmc2":
@@ -146,7 +171,7 @@ def decrypt_args_for(
             audio_hash = str(info.get("audioHash") or "")
             if not audio_hash:
                 raise RustEngineError("酷狗 v5 音频信息缺少 audioHash")
-            key = _kgm_v5_key(audio_hash, rust_path)
+            key = _kgm_v5_key(audio_hash, rust_path, temp_dir)
         else:
             raise RustEngineError(f"不支持酷狗加密版本 {version}")
         args = ["kgm", "--output", dest]
@@ -230,7 +255,7 @@ def _fetch_musicex_ekey(qmpc_path: str, media_filename: str, retries: int = 5) -
     raise RustEngineError("qmpc 重试后仍未取得 ekey")
 
 
-def _kgm_v5_key(audio_hash: str, rust_path: str) -> str:
+def _kgm_v5_key(audio_hash: str, rust_path: str, temp_dir: str = "") -> str:
     """从酷狗本地 KGMusicV3.db 读取 audioHash → EncryptionKey。"""
     appdata = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
     db_path = Path(appdata) / "Kugou8" / "KGMusicV3.db"
@@ -250,7 +275,9 @@ def _kgm_v5_key(audio_hash: str, rust_path: str) -> str:
             except ValueError:
                 db_info = {}
             if db_info.get("encrypted"):
-                fd, name = tempfile.mkstemp(prefix="umrs-kgm-", suffix=".db")
+                fd, name = tempfile.mkstemp(
+                    prefix="umrs-kgm-", suffix=".db", dir=resolve_temp_root(temp_dir)
+                )
                 os.close(fd)
                 temp_db = Path(name)
                 decoded = subprocess.run(

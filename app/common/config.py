@@ -33,6 +33,11 @@ CONFIG_PATH = str(PROJECT_ROOT / "config.json")
 class Config(QConfig):
     """应用配置项集合。"""
 
+    # ===== 外观：语言（自动跟随系统 / 中文 / 英文） =====
+    language = OptionsConfigItem(
+        "General", "language", "自动", OptionsValidator(["中文", "英文", "自动"])
+    )
+
     # ===== 基础路径 =====
     input_dir = ConfigItem("Basic", "input_dir", "")
     output_dir = ConfigItem("Basic", "output_dir", "")
@@ -42,6 +47,9 @@ class Config(QConfig):
     # Rust 版解密引擎（官方 um-conv 使用的离线解密核心）；在设置页选择
     # um-cli-rs 后由 common/rust_decrypt.py 按官方流程驱动。
     um_cli_rs_path = ConfigItem("Basic", "um_cli_rs_path", "")
+    # 临时目录（借鉴官方 um-conv 的 tempDir）：um-cli-rs 解密中间文件放这里；
+    # 空字符串表示使用系统临时目录。设置页可指定（如 space 更大的盘）。
+    temp_dir = ConfigItem("Basic", "temp_dir", "")
 
     # ===== 转换选项（三态：否 / 是 / 默认） =====
     remove_source = OptionsConfigItem(
@@ -63,10 +71,22 @@ class Config(QConfig):
         "Conversion", "skip_noop", "默认", OptionsValidator(["否", "是", "默认"])
     )
 
-    # ===== 调度行为（借鉴官方 preflight + worker pool；无 UI 入口，可通过 config.json 调整） =====
+    # ===== 调度行为（借鉴官方 preflight + worker pool；设置页「任务行为」可调整） =====
     # 默认关闭并发以保持既有串行行为；开启后 0/负数自动取 CPU 核数（上限 256）
     parallel_enabled = ConfigItem("Conversion", "parallel_enabled", False)
     parallel_count = ConfigItem("Conversion", "parallel_count", 0)
+
+    # ===== 编码设置（ffmpeg 编码器可用性探测 + 官方降级顺序） =====
+    # 当前解密链路只做封装探测与元数据写入，不转码；这些配置先落地供后续转码使用。
+    aac_encoder = OptionsConfigItem(
+        "Encoding", "aac_encoder", "自动选择",
+        OptionsValidator(["自动选择", "libfdk_aac", "aac"]),
+    )
+    fdk_vbr = ConfigItem("Encoding", "fdk_vbr", True)
+    ogg_encoder = OptionsConfigItem(
+        "Encoding", "ogg_encoder", "自动选择",
+        OptionsValidator(["自动选择", "libopus", "libvorbis"]),
+    )
 
     # ===== 解密引擎 =====
     # 默认 um（Go 版原链路）；um-cli-rs 走官方 -I 探测 → 密钥解析 → 解密流程。

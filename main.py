@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 from qfluentwidgets import MessageBox
 
 from app.common.config import PROJECT_ROOT
+from app.common.i18n import apply_language
 from app.common.logger import logger
 from app.common.application import SingletonApplication
 from app.view.main_window import MainWindow
@@ -25,6 +26,8 @@ def main():
     logger.info(f"Python {sys.version.split()[0]} | PySide6")
     logger.info(f"项目根目录: {PROJECT_ROOT}")
     app = SingletonApplication(sys.argv, "unclock")
+    # 语言必须在任何控件创建前生效，之后新建的文案设置会自动走翻译过滤
+    apply_language()
     # 单实例：已有实例在运行则提示并退出（不重复启动）
     if app.already_running:
         logger.warning("检测到已有实例在运行，退出本次启动")
@@ -43,6 +46,8 @@ def main():
         host.close()
         return
     window = MainWindow()
+    # 构造参数形式传入的文案（分组标题等）绕过 setText 拦截，建窗后再统一重翻译
+    apply_language()
     window.show()
     app.aboutToQuit.connect(window.on_exit)
     sys.exit(app.exec())

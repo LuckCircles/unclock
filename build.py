@@ -22,8 +22,8 @@ ROOT = Path(__file__).resolve().parent
 
 MAIN_SCRIPT = "main.py"
 APP_NAME = "音乐解锁工具"
-ICON_SVG = "app/resources/img/icon.svg"
-ICON_PATH = "app/resources/img/icon.ico"
+ICON_SVG = "app/resource/img/icon.svg"
+ICON_PATH = "app/resource/img/icon.ico"
 OUTPUT_DIR = "releases"
 EXE_BASENAME = APP_NAME
 DIST_SUFFIX = ".dist"
@@ -36,7 +36,7 @@ def load_version() -> str:
 
 
 def compile_qrc() -> None:
-    """编译 app/resource.qrc -> app/resource_rc.py（图片资源注册）。"""
+    """编译 app/resource/resource.qrc -> app/resource/resource_rc.py（图片资源注册）。"""
     rcc = ROOT / ".venv" / "Scripts" / "pyside6-rcc.exe"
     if not rcc.exists():
         found = shutil.which("pyside6-rcc")
@@ -45,9 +45,9 @@ def compile_qrc() -> None:
         print("[预检失败] 未找到 pyside6-rcc")
         sys.exit(1)
     subprocess.run(
-        [str(rcc), str(ROOT / "app" / "resource.qrc"),
-         "-o", str(ROOT / "app" / "resource_rc.py")],
-        check=True, cwd=str(ROOT),
+        [str(rcc), str(ROOT / "app" / "resource" / "resource.qrc"),
+         "-o", str(ROOT / "app" / "resource" / "resource_rc.py")],
+        check=True, cwd=str(ROOT / "app" / "resource"),
     )
 
 
@@ -133,6 +133,8 @@ def preflight() -> None:
         ROOT / "tools" / "ffmpeg.exe",
         ROOT / "tools" / "qmpc-mmkv-cli.exe",
         ROOT / "tools" / "um_cli_rs.exe",
+        ROOT / "app" / "resource" / "i18n" / "en_US.qm",
+        ROOT / "app" / "resource" / "i18n" / "zh_CN.qm",
     ]
     missing = [str(p) for p in required if not p.exists()]
     if missing:
@@ -221,6 +223,8 @@ def build_command(version: str) -> list[str]:
         rel = f"tools/{exe.name}"
         cmd.append(f"--include-data-file={exe.as_posix()}={rel}")
         print(f"  包含 exe: {rel}")
+    # 翻译文件（qm）已编入 qrc（:/i18n/...）并编译进 resource_rc.py，
+    # 与图片资源同源，无需再作为运行时数据文件内嵌
     # 图片资源已编译进 resource_rc.py（qrc），无需包含 img 目录
     return cmd
 

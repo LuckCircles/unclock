@@ -15,6 +15,7 @@ from qfluentwidgets import (
     isDarkTheme,
 )
 
+from ..common.i18n import translate_ui
 from ..common.signal_bus import signalBus
 from ..components.interface import Interface
 
@@ -85,6 +86,9 @@ class LogInterface(Interface):
         tag = _TAG.get(level, "DEBUG")
         palette = _COLORS_DARK if isDarkTheme() else _COLORS_LIGHT
         color = palette.get(level, palette["debug"])
+        # 数字模板类消息（如「已处理 3/5 个文件…」）按当前语言查表翻译；
+        # 未命中模板（含路径/版本号的消息）原样保留
+        message = translate_ui(message)
         # 消息体做 HTML 转义，防止日志内容中的尖括号被当作标记解析
         safe = html.escape(message)
         self.logText.appendHtml(
