@@ -110,7 +110,7 @@ _FADE_SCROLL_MS = 170
 # 逐帧插值到新几何。只作用于视口附近几十张，开销与卡片总量无关。
 # 位移用 OutCubic（起步利落、落位绵长），与瀑布流入场的 OutQuart 刻意
 # 区分：几何移动比透明度变化更需要「稳稳停住」的收尾。
-_RELAYOUT_MOVE_MS = 280
+_RELAYOUT_MOVE_MS = 300
 _RELAYOUT_MOVE_EASING = QEasingCurve.OutCubic
 # 无旧几何可插值（列数变化后新进入视口）的卡片：不从 0 开始，短淡入补位，
 # 避免凭空闪现。与位移共用一个动画对象，不额外增加并发动画。
@@ -351,7 +351,13 @@ class GridCardContainer(QWidget):
             else:
                 self._relayoutTimer.start()
             self._sync_overlay_geometry()
+            # 视口尺寸落定后通知子类：首次进入时后台扫描可能在视口还是
+            # 默认 100×30 时就完成，结果被暂存；这里让子类把暂存结果补上。
+            self._on_viewport_resized()
         return super().eventFilter(obj, event)
+
+    def _on_viewport_resized(self):
+        """视口尺寸变化后的子类钩子（基类空操作）。"""
 
     def showEvent(self, e):
         super().showEvent(e)
@@ -397,8 +403,8 @@ class GridCardContainer(QWidget):
         stride = _ROW_H + _V_SPACING
         y0 = self.scrollArea.verticalScrollBar().value()
         y1 = y0 + self.scrollArea.viewport().height()
-        first = max(int(y0 // stride) - 1, 0)
-        last = int(y1 // stride) + 1
+        first = max(int(y0 // stride) - 2, 0)
+        last = int(y1 // stride) + 2
         out = []
         for i in range(self.gridLayout.count()):
             item = self.gridLayout.itemAt(i)

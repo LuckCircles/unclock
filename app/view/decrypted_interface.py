@@ -53,6 +53,10 @@ from ..components.task_card import TaskCard
 
 # 搜索输入防抖（毫秒）：逐字符触发全量铺格实测 6 字符 526ms，合并后只重排一次
 _SEARCH_DEBOUNCE_MS = 120
+# 视口宽度下限：低于此值视为「尚未获得真实尺寸」（未布局时 QScrollArea
+# 视口为默认 100×30）。此时若扫描已完成，不能按错误尺寸建卡——暂存结果，
+# 等布局稳定（showEvent / viewport Resize）后再应用，避免首次进入布局错乱。
+_MIN_LAYOUT_VP_W = 120
 # 媒体探测同时在途上限：ffmpeg 是 CPU/IO 密集进程，不能占满全局线程。
 # 探测任务**不再一次性全量塞进线程池**（QThreadPool 队列是 FIFO，会让
 # 当前屏幕的封面排在几千个文件之后），改由主线程按「当前视口可见优先」
@@ -300,10 +304,15 @@ class DecryptedInterface(GridCardContainer):
         self._filled_once = False
         # 首次填充完成前抑制空提示（防止"0 个文件"假象闪现在页面中部）
         self._filling = True
+        # 视口未稳定时暂存的扫描结果：首次进入若后台扫描在布局完成前结束，
+        # 先缓存，等 showEvent / viewport Resize 布局稳定后再应用。
+        self._pending_scan_payload = None
 
     def showEvent(self, e):
         super().showEvent(e)
         self._pause_media_during_transition()
+        # 布局稳定后补用被暂存的扫描结果（首次进入兜底）
+        self._flush_pending_scan()
         if not self._filled_once:
             self._filled_once = True
             self._refresh_mode = False
@@ -700,6 +709,37 @@ class DecryptedInterface(GridCardContainer):
         if payload is None:
             # 当前代次还在扫描中，稍后它自己的通知会再进本槽
             return
+        vp = self.scrollArea.viewport()
+        # 视口尚未获得真实尺寸（首次切入的布局过渡期，仍是默认 100×30）：
+        # 按它算列数/内容高度全错，会建出错误布局且后续 same 短路不再修正，
+        # 表现为「首次进入无滚动条、滚不动，最大化才恢复」。暂存结果，
+        # 等 viewport Resize / showEvent 布局稳定后由 _flush_pending_scan 补上。
+        if vp.width() < _MIN_LAYOUT_VP_W:
+            self._pending_scan_payload = payload
+            logger.debug(
+                f"[scan_done] deferred: vp={vp.width()}x{vp.height()} "
+                f"< {_MIN_LAYOUT_VP_W}, payload cached"
+            )
+            return
+        self._apply_scan_payload(payload)
+
+    def _flush_pending_scan(self):
+        """布局稳定后补用被暂存的扫描结果（首次进入兜底）。"""
+        if self._pending_scan_payload is None:
+            return
+        vp = self.scrollArea.viewport()
+        if not self.isVisible() or vp.width() < _MIN_LAYOUT_VP_W:
+            return
+        payload = self._pending_scan_payload
+        self._pending_scan_payload = None
+        logger.debug("[scan_done] flush: applying deferred payload")
+        self._apply_scan_payload(payload)
+
+    def _on_viewport_resized(self):
+        """视口尺寸落定（基类钩子）：补用被暂存的扫描结果。"""
+        self._flush_pending_scan()
+
+    def _apply_scan_payload(self, payload):
         (_gen, items, input_basenames, empty_msg, scan_error) = payload
         vp = self.scrollArea.viewport()
         logger.debug(
@@ -712,6 +752,9 @@ class DecryptedInterface(GridCardContainer):
         # 等 showEvent 用真实视口重新扫描（代次号继续串联，不残留在途）。
         if not self.isVisible() and not self._filled_once:
             return
+        # 走到这里说明结果即将被应用（页面可见，或已填充过的隐藏态刷新），
+        # 标记已填充，防止 showEvent 随后再触发一次重复扫描。
+        self._filled_once = True
         refresh = self._refresh_mode
         if scan_error:
             # 目录读取失败：保留旧列表，不把已有卡片清空成「暂无文件」，
