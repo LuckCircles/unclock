@@ -11,9 +11,15 @@
 import os
 import time
 
-from PySide6.QtCore import QByteArray, QRect, Qt
+from PySide6.QtCore import QByteArray, QEasingCurve, QRect, Qt, QVariantAnimation
 from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPixmap
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout
+from PySide6.QtWidgets import (
+    QGraphicsOpacityEffect,
+    QHBoxLayout,
+    QLabel,
+    QSizePolicy,
+    QVBoxLayout,
+)
 from qfluentwidgets import (
     CaptionLabel,
     CardWidget,
@@ -29,6 +35,9 @@ from .marquee_label import MarqueeLabel
 # 封面缩略图尺寸 / 圆角半径（卡片高 64，内容区 44，正好贴合）
 _COVER_SIDE = 44
 _COVER_RADIUS = 6
+# 封面真图淡入时长：占位图 → 专辑封面的平滑过渡，与滚动短淡入
+# （_FADE_SCROLL_MS=170）同量级，快到不打断浏览节奏、慢到不觉得闪现
+_COVER_FADE_MS = 220
 
 # 任务状态 → (徽章构造方法, 文本)
 _STATUS_META = {
@@ -244,6 +253,40 @@ class TaskCard(CardWidget):
         self._has_real_cover = False
 
     # ------------------------------------------------------------ 封面（可选能力）
+    def _fade_in_cover(self):
+        """封面真图淡入：占位图 → 专辑封面平滑过渡。
+
+        淡入期间给缩略图挂 QGraphicsOpacityEffect，结束后移除——稳态零
+        开销，不改变卡片其余部分的合成方式。重入（快速连续回填）时先收
+        掉上一次动画，从当前不透明度继续，不闪烁。
+        """
+        label = self._cover_label
+        if label is None:
+            return
+        ani = getattr(self, "_cover_fade_ani", None)
+        if ani is not None:
+            return  # 回填已排队：本次 setPixmap 已就位，等动画收尾即可
+        effect = QGraphicsOpacityEffect(label)
+        label.setGraphicsEffect(effect)
+        effect.setOpacity(0.0)
+        ani = QVariantAnimation(self, duration=_COVER_FADE_MS)
+        ani.setStartValue(0.0)
+        ani.setEndValue(1.0)
+        ani.setEasingCurve(QEasingCurve.OutCubic)
+
+        def _tick(v, eff=effect):
+            eff.setOpacity(v)
+
+        def _done(ani_ref=ani, lab=label):
+            self._cover_fade_ani = None
+            lab.setGraphicsEffect(None)   # 移除合成层，稳态绘制零开销
+            ani_ref.deleteLater()
+
+        ani.valueChanged.connect(_tick)
+        ani.finished.connect(_done)
+        self._cover_fade_ani = ani
+        ani.start()
+
     def set_cover_pixmap(self, pixmap: QPixmap | None):
         """直接贴已裁剪好的 44×44 圆角缩略图（缩略图缓存命中路径）。
 
@@ -255,6 +298,8 @@ class TaskCard(CardWidget):
             return
         if pixmap is not None and not pixmap.isNull():
             self._cover_label.setPixmap(pixmap)
+            if not self._has_real_cover:
+                self._fade_in_cover()   # 占位 → 真图：淡入过渡
             self._has_real_cover = True
         else:
             self._cover_label.setPixmap(_placeholder_cover())
@@ -272,6 +317,8 @@ class TaskCard(CardWidget):
             pixmap = _rounded_cover(png_bytes)
             if not pixmap.isNull():
                 self._cover_label.setPixmap(pixmap)
+                if not self._has_real_cover:
+                    self._fade_in_cover()   # 占位 → 真图：淡入过渡
                 self._has_real_cover = True
                 return pixmap
         self._cover_label.setPixmap(_placeholder_cover())

@@ -44,7 +44,6 @@ from PySide6.QtCore import (
     QEvent,
     QPropertyAnimation,
     QRect,
-    QSignalBlocker,
     Qt,
     QTimer,
     QVariantAnimation,
@@ -90,6 +89,11 @@ _CARD_POOL_MAX = 96
 # 卡片构建耗时不一（磁盘 stat / 徽章控件创建），按时间切片比固定张数
 # 分批更能把每帧开销稳定压在一帧预算内，填充期间交互不卡顿。
 _FILL_BUDGET_MS = 12
+# 滚动物化单帧建卡上限：真实卡片构建约 9.5ms/张（Fluent 控件树 + 占位图
+# 绘制），全屏 4 列时滚动一个预载行就要建 8 张（约 76ms），一次建完必掉
+# 数帧——真机实测滚动逐批顿挫。超限部分 singleShot(0) 下帧续传（已物化
+# 条目天然跳过，续传零重复），把每帧物化开销压进帧预算。
+_MATERIALIZE_MAX_NEW = 6
 # 视口 resize 重排防抖（毫秒）：拖拽缩放 / 全屏切换时合并连续 resize 事件，
 # 只在尺寸稳定后重排一次。原 40ms 在 Windows 最大化动画（约 250ms）期间
 # 会被帧间隙（偶发 45~60ms）切开，触发 2~3 次全量摘挂；提到 80ms 覆盖
@@ -1064,12 +1068,20 @@ class GridCardContainer(QWidget):
         )
         changed = False
         new_cards = []
+        budget_left = _MATERIALIZE_MAX_NEW
         for pos in range(first_row * cols, (last_row + 1) * cols):
             if pos >= len(self._view):
                 break
             item = self._view[pos]
             if item in self._card_cache:
                 continue
+            if budget_left <= 0:
+                # 单帧建卡预算用尽：余下行下帧续传（本方法重入时已物化
+                # 条目自然跳过，从断点继续）。滚动每帧建卡开销被压进
+                # 帧预算，长列表高速滚动不再逐批顿挫。
+                QTimer.singleShot(0, lambda: self._materialize_visible(stagger))
+                break
+            budget_left -= 1
             self._spacer_at.pop(item, None)
             card = self._reuse_card(item)   # 优先复用回收卡片
             if card is None:
@@ -1209,7 +1221,12 @@ class GridCardContainer(QWidget):
             # 避免两套淡入叠加成不可控的逐行刷新。
             had_cards = bool(self._card_cache)
             self._suppress_materialize_fade = had_cards or refresh
-            blocker = QSignalBlocker(sb)
+            # 只断 valueChanged：重建期间 range 骤降/回顶会触发误物化，
+            # 但「rangeChanged→SmoothScrollBar.setRange」的同步链必须保持
+            # 畅通——QSignalBlocker 会连 rangeChanged 一起吞掉，浮动滚动条
+            # 从此停在 (0,0)：delegate 误判「已滚到底」吃掉滚轮事件、滚动
+            # 条也不显示，直到全屏触发列数变化才恢复（真机实测）。
+            sb.valueChanged.disconnect(self._on_lazy_scroll)
             self.scrollArea.setUpdatesEnabled(False)
             try:
                 self._pending_paths = deque()
@@ -1233,7 +1250,7 @@ class GridCardContainer(QWidget):
                 self._materialize_visible()
             finally:
                 self._suppress_materialize_fade = False
-                blocker.unblock()
+                sb.valueChanged.connect(self._on_lazy_scroll)
                 self.scrollArea.setUpdatesEnabled(True)
             # 重建期间因滚动条显隐排队的 resize 重排已无必要（列数按最终
             # 视口宽度算过），取消它以免 40ms 后再摘挂一次全部卡片
