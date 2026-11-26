@@ -11,6 +11,129 @@
 > 「刷新 = 屏幕闪一次、卡片位置与内容均不变」的契约。新契约为
 > **「刷新后列表回到顶部，卡片从第一张开始自上而下逐张刷新」**。
 
+### 变更：新增解密引擎选择（um / um-cli-rs）与三份工具文档（2026-11-26）
+
+**需求**：设置页增加解密工具选择；选 `um-cli-rs` 时按官方工具流程解密，选 `um` 时链路不变；在 `docs/` 生成除 ffmpeg 外三个工具的使用文档。
+
+| 文件 | 改动 |
+|---|---|
+| `app/common/config.py` | 新增 `decrypt_engine`（`um` / `um-cli-rs`，默认 `um`） |
+| `app/common/rust_decrypt.py`（新增） | 纯逻辑：后缀→子命令、`prepare_rust_job` 临时目录与 NCM 官方参数、`parse_probe`、`decrypt_args_for`（QMC2 PCv1/QTag/MusicEx/STag 分流、KGM v2/3/v5、KWM v1/v2）、qmpc 取 ekey（exit=5 重试 5 次）、KGM 加密 DB 借 um-cli-rs 解到临时 SQLite 后读 `ShareFileItems`、ffmpeg 探测真实 demuxer 后原子落盘 |
+| `app/service/converter.py` | 按 `decrypt_engine` 分派：preflight 校验所选引擎；`_prepare_job` / `_launch_process` 支持 probe→decrypt 两阶段续启；`-I` 输出含 ekey 只缓存不写日志；Rust 路径的跳过/删除源文件/临时目录清理；`um` 分支参数构造与行为保持不变；对外信号签名全部不变 |
+| `app/view/setting_interface.py` | 基础设置新增 `ComboBoxSettingCard`「解密工具」，切换时启用对应工具路径卡；`um-cli-rs` 路径卡提示改为引擎路径 |
+| `docs/um-使用文档.md`、`docs/um-cli-rs-使用文档.md`、`docs/qmpc-mmkv-cli-使用文档.md`（新增） | 基于 `--help` 实测与官方源码的三份中文文档 |
+| `README.md` | 同步双引擎说明、目录结构、qmpc 两条调用路径与文档索引 |
+
+**边界**：Rust 引擎只覆盖官方支持的 NCM / KGM / KWM / QMC2；QMCv1 与 BKC 等格式明确提示切回 um。ADB 密钥（QMC STag / 酷我 v2）未接入，遇此情况报错并跳过该文件。
+
+**验证（源码级，未执行打包命令）**：
+- 真实文件端到端：NCM 1.3s 输出 80,941,963 字节 FLAC；QMC2 `.mflac` 0.2s 完成 `-I` 探测 + 带 ekey 解密，输出 28,511,721 字节 FLAC；两者 `conversion_finished=0`，日志无 ekey 泄露。
+- `um` 分支回归：假 um 脚本收到原样 `-i/-o/-n` 参数，三态「否」提示仍在；不支持格式给出切回提示；所选引擎缺失时 preflight 立即 `conversion_finished(-1)`。
+- 设置页组件：两项文本与配置值顺序一致，切换后仅对应路径卡可用；`py_compile` 通过；跨层依赖违规 0；`build_command()` 静态确认四个 exe 内嵌；离屏启动 8 秒无 Traceback。
+- 测试期间设置页控件把新键写进了 `config.json`，已按原内容恢复（原键顺序与值未变）。
+
+### 变更：官方工具链算法分析 + 首页新增 um-cli-rs 卡片（2026-11-26）
+
+**需求**：参考官方 `um-conv` 的 mmkv 密钥提取、`um-cli-rs`、`ffmpeg` 与 AAC/OGG 编码器逻辑，并把 `um-cli-rs` 卡片加到首页。**解密引擎未切换，仍是 Go 版 `um.exe`**；本次只做设计分析 + 检测卡片。
+
+| 文件 | 改动 |
+|---|---|
+| `app/common/config.py` | 新增 `um_cli_rs_path`（默认 `tools/um_cli_rs.exe`）并纳入启动自动探测；首次运行生成的配置说明由「三个 exe」改为「四个 exe」 |
+| `app/service/tool_detector.py` | `ToolsReport` 扩为四项，新增 `_check_um_cli_rs()`：`-V` / `--version` 解析 `um_cli_rs 0.1.13`；运行日志同步增加一行 |
+| `app/view/home_interface.py` | 首页新增第四张 `um-cli-rs` 卡片（2×2 网格），官网指向 `lib_um_crypto_rust/releases`；图标复用 qrc 中的 `icon.svg` |
+| `app/view/setting_interface.py` | 基础设置新增 `um-cli-rs 路径` 选择卡与 Fluent 提示 |
+| `build.py` | 预检清单加入 `um_cli_rs.exe`；`tools/*.exe` glob 已自动内嵌该 exe，无需改打包参数 |
+
+**官方算法结论（仅借鉴，未移植）**：
+- `qmpc-mmkv-cli -o - -f plaintext -F <媒体文件名>` → stdout 双行键值交替解析；仅用于 QMC2 `MusicEx` 且文件未内嵌 ekey 时；exit=5（CRC/read-on-write）重试 5 次，密钥查询用互斥锁串行——与本项目「QMC 单独 lane」一致。
+- `um-cli-rs` 每个平台一个子命令，`-I/--info-only` 先输出 `footerLen/ekey/metadataType/musicexMediaFilename` JSON 再决定是否取外部密钥；`qmc2 --ekey … --output … -- <src>` 完成解密。Go 版 `um` 是单体编排器（含网络元数据与 `--watch`），Rust 版是纯离线原语。
+- `ffmpeg`：`-version` 取版本 + `-encoders` 懒加载缓存编码器；`ffmpeg -i file:<path>` 无输出时 rc=1，用 demuxer 名推断真实扩展（`.webm` 特判）；`-progress pipe:1` + `out_time_us` 算百分比。AAC 自动选 `libfdk_aac → aac`，OGG 选 `libopus → libvorbis`；FDK 可开 VBR，否则按高/中/低 256/192/128k（OGG Opus 192/128/96k、Vorbis q8/6/4）。
+
+**验证（源码级，未执行打包命令）**：四工具真实检测全部就绪（`um v0.2.20` / `ffmpeg 8.1.3-Jellyfin` / `qmpc 1.0.4` / `um_cli_rs 0.1.13`）；缺失路径分支显示「未找到 + MISS」；离屏实例化首页/设置页确认第四张卡片与路径卡、图标非空、网格位置 (1,1)；`build_command()` 静态确认四个 exe 均内嵌且 SVG 插件未被排除；`py_compile` 通过、跨层依赖违规 0、离屏启动 8 秒无 Traceback、`config.json` 未写回。
+
+### 变更：借鉴官方解密交互算法（后端调度，UI 零改动）（2026-11-26）
+
+**需求**：「借鉴解密交互算法，不改ui。」只改 `common` / `service`，沿用现有全部信号与界面。
+
+| 文件 | 改动 |
+|---|---|
+| `app/common/task_planner.py`（新增） | `resolve_executable()`（绝对路径校验 / 内置 tools → PATH 兜底）、`resolve_parallel()`（官方规则：关闭→1、≤0→CPU 核数、上限 256）、`build_decrypt_plan()`（一次扫描完成 claim / 去后缀基名 / lane 标记；QMC 密钥查询归入同一串行 lane，同名输出同样串行） |
+| `app/common/config.py` | 新增 `parallel_enabled`（默认 `False`）与 `parallel_count`（默认 `0`）两个**无 UI 入口**配置项，可在 `config.json` 手动开启 |
+| `app/service/converter.py` | 重写为 preflight → plan → worker pool：工具解析失败即停；受控并发且 lane 互斥；`generation` 丢弃旧轮回调；优雅停止（未领取任务 `file_cancelled`，在飞任务跑完再统一收尾）；Windows 子进程设 `IDLE_PRIORITY_CLASS`；结束汇总改为官方风格「已处理 x/y，成功 a，跳过 b，错误 z，取消 d」 |
+
+**验证（源码级，未执行打包命令）**：
+- 真实 `um -v` / 工具路径解析、串行默认与并发开关、QMC lane 串行、优雅停止、preflight 缺工具、旧 generation 回调守卫均实测通过。
+- 5 个任务开 4 worker 时实际收敛为 3 条 lane、3 个并发 worker；3 个 QMC 任务互不重叠。停止时 2 个在飞任务正常写出结束标记，2 个排队任务收到 `file_cancelled`，`conversion_finished` 仅一次。
+- 外部信号签名与 UI 文件零改动；`config.json` 未被写回。
+
+### 变更：窗口标题/图标统一为 icon.svg，移除封面说明标签（2026-11-26）
+
+**需求**：截图中的「内嵌封面 · 800 × 800」标签不要；标题去掉「Fluent UI」；左上角图标与打包图标都换成 `icon.svg`，同步更新 qrc 并重新编译资源。
+
+| 文件 | 改动 |
+|---|---|
+| `app/components/file_info_dialog.py` | 删除 `coverCaption` 控件（含「无内嵌封面」/「内嵌封面 · W × H」两种文本），保留封面画框与「保存封面」结果反馈标签 |
+| `app/view/main_window.py` | 窗口标题改为「音乐解锁工具」；窗口图标由 `um.ico` 改为 qrc 资源 `:/img/icon.svg` |
+| `app/resource.qrc` / `app/resource_rc.py` | 注册 `icon.svg`、移除不再使用的 `um.ico` 别名；已用 `pyside6-rcc` 重新编译（资源编译，非 Nuitka 打包） |
+| `build.py` | 新增 `build_windows_icon()`：用 QtSvg 把 `icon.svg` 光栅化为 7 个尺寸并手写 ICO（PNG 条目），预检时生成 `app/resources/img/icon.ico`；`--windows-icon-from-ico` 指向该生成物 |
+
+**验证（源码级，未执行 Nuitka 打包）**：
+- `py_compile` 通过；`build_command()` 静态检查图标参数为 `icon.ico`，三个 exe 仍内嵌。
+- 生成的 ICO：7 个尺寸（16/24/32/48/64/128/256）、ICO 目录偏移与 PNG 签名全部正确；Windows `ExtractIconW` 成功加载。
+- 离屏实例化主窗口：标题为「音乐解锁工具」，SVG 图标非空且 64×64 可渲染；文件信息弹窗无 `coverCaption`，无「封面」字样标签。
+
+### 变更：B 方案落地 —— 封面标签块直读，元数据仍用 ffmpeg（2026-11-26）
+
+**需求**：「B 方案改动，增加封面解析的速度。」承接上一轮只读分析结论。
+
+| 文件 | 改动 |
+|---|---|
+| `app/common/cover_loader.py` | 新增 `_read_flac_picture()`（FLAC `PICTURE` 块）/ `_read_id3_picture()`（MP3 ID3v2 `APIC`/v2.2 `PIC`），`read_embedded_cover()` 返回 **(原始图片字节, 容器是否识别)**；`extract_cover_bytes()` **签名不变**，改为标签块直读优先、不可识别/异常才回退 ffmpeg；新增 `cover_bytes_to_png()`，只在保存时把 JPEG 转成 PNG |
+| `app/common/media_info.py` | `probe_media()` 拆开：封面交给 `extract_cover_bytes()`（零进程），元数据仍走一次 `probe_audio_info()`；删除不再使用的 `_PNG_SIGNATURE` |
+| `app/view/decrypted_interface.py` | `_save_cover()` 写盘前调用 `cover_bytes_to_png()` —— 目标固定 `<歌名>.png`，不能把 JPEG 字节直接写成 PNG；其余调用点零改动 |
+| `build.py` | **恢复 `qjpeg.dll`**（约 0.56MB），否则打包版 `QImage.fromData` 解不了原始 JPEG 封面；其余图片格式仍排除 |
+| `task_card.py` / `file_info_dialog.py` / `cover_thumb_cache.py` | 仅同步 docstring（字节从「PNG」改为「JPEG/PNG」），`QImage.fromData` 本身两种格式都支持，解码代码零改动 |
+| `README.md` / `docs/已解密列表-内嵌专辑封面可行性分析.md` | 同步功能、性能表与依赖说明；分析文档补 2026-11-26 落地备注 |
+
+**决策说明（证据）**：
+- **不新增依赖**：`.venv` 无 mutagen / Pillow；FLAC PICTURE 与 ID3v2 APIC 用 `struct`/`int.from_bytes` 直读即可覆盖当前库，无需 `uv add`。
+- **不在探测路径转码**：实测 800×800 JPEG → PNG 约 **226–248ms**，与 ffmpeg 编码 PNG 同量级；改为缓存原始字节、QImage 直接解码，转码只在用户点「保存封面」时发生。JPEG 占当前库 **238/350 FLAC + 29/29 MP3**，这一决策是提速关键。
+- **识别容器即不启进程**：确认无内嵌图返回 `(None, True)`，`extract_cover_bytes` 直接返回 `None`；只有未知容器/异常才回退 ffmpeg，格式兼容不回退。
+
+**实测数据**：
+- 当前输出目录：350 FLAC（全部有 PICTURE，238 JPEG / 112 PNG）+ 29 MP3（全部 APIC JPEG）。
+- 封面提取：FLAC **0.68ms**、MP3 **1.12ms**，monkeypatch 验证 **ffmpeg 调用数 = 0**；改动前同 10 文件 ffmpeg 提取 **4044ms**。
+- 整条 `probe_media`：5 文件 **1126ms → 462ms（2.4×）**（元数据探测仍占大头）；独立实测封面字节 72839B + title/artist/duration/codec 均正确。
+- PNG 源文件原样返回（字节恒等）；原始 JPEG 卡片缩略图与详情大图解码均非空（44×44 / 800×800）。
+- 无封面 FLAC 不启 ffmpeg；未知 WAV 与异常 FLAC 正确回退 ffmpeg。
+
+**踩坑（实现过程）**：
+- `QBuffer(QByteArray())` 用临时对象会被回收，实测 **段错误**；改为持有 `byte_array` 局部变量（后续转码只在保存路径触发）。
+- FLAC PICTURE 的 `description_len` 位于 MIME **之后**，初版按紧邻 MIME 长度读取导致全部误判为「无封面」。
+- 跳过 metadata block 时误用 `seek(absolute, SEEK_CUR)`，应传绝对偏移（默认 `SEEK_SET`）。
+
+**保持不变**：`extract_cover_bytes` / `probe_media` 签名、三张封面缓存与双队列调度、封面字节契约对 UI 透明、固定同名 `.png` 覆盖语义、解密转换仍依赖 ffmpeg。
+
+**验证**：`py_compile` 通过；上述源码实测全部通过；`build_command()` 静态确认 qjpeg 不再排除、QtXml 仍保留、三个 exe 均内嵌；跨层依赖违规 **0**；offscreen 启动 8s 无 Traceback；`config.json` 未改。全程**未执行任何 Nuitka 打包命令**。
+
+### 变更：tools 版本检测改为「文件属性优先，命令行兜底」（2026-11-26）
+
+**需求**：「tools 文件夹里面的 exe 文件版本信息提取，先通过文件属性获取，如果可以获取则显示，如文件属性无法提取，则使用 -v 命令提取。」
+
+| 文件 | 改动 |
+|---|---|
+| `app/common/version_info.py` | **新增** `read_file_version(path)`：用 `ctypes` 调 `version.dll` 读 PE 版本资源，优先级 `FileVersion → ProductVersion → VS_FIXEDFILEINFO` 数字版本；无资源 / 非 Windows / 读取异常返回 `None`。纯标准库、不依赖 pywin32 |
+| `app/service/tool_detector.py` | 三个工具统一走 `_probe()`：先 `read_file_version()`，命中即 `ToolInfo(version, True, "文件属性")`；否则按工具依次尝试命令行版本参数解析；`ToolInfo` 增 `source` 字段，运行日志逐条标注来源 |
+
+**决策说明（证据）**：
+- 实测三个 exe 的文件属性：`ffmpeg.exe = 8.1.3-Jellyfin`（可提取）；`um.exe` / `qmpc-mmkv-cli.exe` 为空（Go 编译无版本资源）→ 必须兜底。
+- 兜底参数按各工具**真实版本参数**选择：`um -v`（实测 `Unlock Music CLI version v0.2.20 ...`）、`ffmpeg -version`（`-v` 是日志级别参数，会打印版本后报缺参）、`qmpc -V`（`-v` 是 verbose，会**真实执行密钥提取并写 `qmpc-mmkv-v1.mmkv`**，不能用于取版本）。各留一个备用参数（`-h` / `-v` / `--version`）防版本参数变更。
+- 文件存在但版本取不到仍判 `ready=True`（沿用既有行为）；版本来源写进 `工具监测 xxx: ... (就绪 / 命令行 -v)` 日志，便于核对。
+
+**保持不变**：`ToolsReport` 信号载荷、`VersionCard` 展示与徽章逻辑、`detect_async()` 线程池路径、超时 8s、配置文件与界面布局。
+
+**验证**：`py_compile` 通过；源码实测 `ToolDetector().detect()` 输出 `um=v0.2.20(命令行 -v)`、`ffmpeg=8.1.3-Jellyfin(文件属性)`、`qmpc=1.0.4(命令行 -V)`；临时假 exe 验证 `--version` 备用参数与「未找到」分支；离屏启动 8s 无 Traceback，跨层依赖违规 **0**，`config.json` 未改。全程**未执行任何 Nuitka 打包命令**。
+
 ### 变更：详情界面改为参考图布局（顶部标题行 + 左大图 + 键左对齐）（2026-11-25）
 
 **需求**：用户提供详情界面参考图（手办资料卡），要求「按照这个布局，修改详情界面」。参考图特征：顶部一行左对齐「中文字段名：值」标题；左侧竖向大图占约 1/3 宽；右侧键值表**键名左对齐**、值左对齐，纵向多行。

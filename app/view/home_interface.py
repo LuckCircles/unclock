@@ -27,13 +27,15 @@ from ..components.interface import Interface
 from ..components.path_card import PathCard
 from ..components.version_card import VersionCard
 
-# 三张工具检测卡片右下角分享按钮对应的官方网站 / 官方仓库。
+# 四张工具检测卡片右下角分享按钮对应的官方网站 / 官方仓库。
 # 来源：um CLI 官方仓库（用户 2026-11-09 指定）、FFmpeg 官网、
-# docs/qmpc-mmkv-使用教程.md（官方仓库）。换网址只改这一处。
+# docs/qmpc-mmkv-使用教程.md（官方仓库）、um-conv 设置页给出的
+# lib_um_crypto_rust 发布页。换网址只改这一处。
 TOOL_HOMEPAGES = {
     "um": "https://git.um-react.app/um/cli",
     "ffmpeg": "https://ffmpeg.org/",
     "qmpc": "https://git.um-react.app/um/qmpc-mmkv",
+    "um_cli_rs": "https://git.um-react.app/um/lib_um_crypto_rust/releases/",
 }
 
 
@@ -74,9 +76,9 @@ class HomeInterface(Interface):
             self.flipView.setCurrentIndex(0)
         self.vLayout.addWidget(self.flipView)
 
-        # 工具检测卡片（三卡均分，与下方路径卡片同构对齐）
+        # 工具检测卡片（四卡两行均分，与下方路径卡片同构对齐）
         self.umCard = VersionCard(
-            "Unlock Music (um)", image("um.png"), "音乐解锁核心引擎",
+            "um", image("um.png"), "音乐解锁核心引擎",
             homepage=TOOL_HOMEPAGES["um"],
         )
         self.ffmpegCard = VersionCard(
@@ -87,9 +89,13 @@ class HomeInterface(Interface):
             "QMPC MMKV", image("qmpc.png"), "QQ 音乐密钥自动提取",
             homepage=TOOL_HOMEPAGES["qmpc"],
         )
-        self.umCard.set_detecting()
-        self.ffmpegCard.set_detecting()
-        self.qmpcCard.set_detecting()
+        # 官方 um-conv 的离线解密核心，可通过设置页切换为解密引擎
+        self.umCliRsCard = VersionCard(
+            "um-cli-rs", image("icon.svg"), "Rust 离线解密引擎",
+            homepage=TOOL_HOMEPAGES["um_cli_rs"],
+        )
+        for card in (self.umCard, self.ffmpegCard, self.qmpcCard, self.umCliRsCard):
+            card.set_detecting()
 
         self.toolsTitle = StrongBodyLabel("工具检测", self)
         self.vLayout.addWidget(self.toolsTitle)
@@ -102,6 +108,7 @@ class HomeInterface(Interface):
         self.toolsGrid.addWidget(self.umCard, 0, 0)
         self.toolsGrid.addWidget(self.ffmpegCard, 0, 1)
         self.toolsGrid.addWidget(self.qmpcCard, 1, 0)
+        self.toolsGrid.addWidget(self.umCliRsCard, 1, 1)
         self.toolsGrid.setColumnStretch(0, 1)
         self.toolsGrid.setColumnStretch(1, 1)
         self.vLayout.addLayout(self.toolsGrid)
@@ -166,7 +173,9 @@ class HomeInterface(Interface):
         self.btnAction.clicked.connect(self._on_action_clicked)
         self.inputDirCard.clicked.connect(self._open_input_dir)
         self.outputDirCard.clicked.connect(self._open_output_dir)
-        for card in (self.umCard, self.ffmpegCard, self.qmpcCard):
+        for card in (
+            self.umCard, self.ffmpegCard, self.qmpcCard, self.umCliRsCard
+        ):
             card.homepage_requested.connect(self._open_homepage)
         signalBus.tools_detected.connect(self._on_tools_detected)
         signalBus.toast_requested.connect(self._show_toast)
@@ -186,10 +195,13 @@ class HomeInterface(Interface):
             self._set_button_state("stopping")
 
     def _on_tools_detected(self, report):
-        """工具检测完成：按报告更新三张检测卡片（载荷为 ToolsReport dataclass）。"""
+        """工具检测完成：按报告更新四张检测卡片（载荷为 ToolsReport dataclass）。"""
         self.umCard.update_info(report.um.version, report.um.ready)
         self.ffmpegCard.update_info(report.ffmpeg.version, report.ffmpeg.ready)
         self.qmpcCard.update_info(report.qmpc.version, report.qmpc.ready)
+        self.umCliRsCard.update_info(
+            report.um_cli_rs.version, report.um_cli_rs.ready
+        )
 
     def _open_input_dir(self):
         self._open_directory(cfg.input_dir.value, "输入目录")

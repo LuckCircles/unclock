@@ -6,7 +6,7 @@
         <file alias="ffmpeg.png">resources/img/ffmpeg.png</file>
         <file alias="qmpc.png">resources/img/qmpc.png</file>
         <file alias="task_complete.png">resources/img/task_complete.png</file>
-        <file alias="um.ico">resources/img/um.ico</file>
+        <file alias="icon.svg">resources/img/icon.svg</file>
         <file alias="QQMusic.png">resources/img/QQMusic.png</file>
         <file alias="WangYiYun_Music.png">resources/img/WangYiYun_Music.png</file>
         <file alias="KuGou_Music.png">resources/img/KuGou_Music.png</file>

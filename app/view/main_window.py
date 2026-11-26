@@ -70,8 +70,8 @@ class MainWindow(MSFluentWindow):
 
     def init_window(self):
         self.resize(1080, 760)
-        self.setWindowTitle("音乐解锁工具 - Fluent UI")
-        self.setWindowIcon(QIcon(image("um.ico")))
+        self.setWindowTitle("音乐解锁工具")
+        self.setWindowIcon(QIcon(image("icon.svg")))
         desktop = QApplication.primaryScreen().availableGeometry()
         w, h = desktop.width(), desktop.height()
         self.move(w // 2 - self.width() // 2, h // 2 - self.height() // 2)

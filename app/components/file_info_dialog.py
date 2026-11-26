@@ -5,7 +5,7 @@
 随应用主题（浅色/深色）与强调色自动切换。布局参照用户提供的详情图：
 顶部左对齐「文件名：xxx」标题行（超长文件名自动跑马灯），主体**左右分栏**
 ——左侧 270×340 竖向画框内嵌封面（等比缩放不裁剪、圆角，无封面时画主题色
-音符占位图，下方标注原图像素），右侧 14 行键值表（**键名左对齐**、值左对齐，
+音符占位图），右侧 14 行键值表（**键名左对齐**、值左对齐，
 键列固定宽、值列吃剩余）。**所有值均单行显示**：文本过长（超出右列宽）时
 由跑马灯自动首尾相连滚动完整展示，不过长则静态单行，绝不换行堆高；完整
 路径额外带强调色可点击链接（点击在文件管理器中定位选中）与 Fluent
@@ -47,7 +47,7 @@ _KEY_COL_W = 76
 
 
 def _decode_cover(png_bytes):
-    """封面 PNG 字节 → ``(圆角等比缩略图, 原图宽, 原图高)``。
+    """封面图片字节（JPEG/PNG） → ``(圆角等比缩略图, 原图宽, 原图高)``。
 
     ``KeepAspectRatio`` 保留整张封面不被裁切：在 270×340 的竖向画框里等比
     缩放并居中留白（专辑封面多为正方形，上下留白属预期），圆角只作用在缩放
@@ -129,7 +129,7 @@ class FileInfoDialog(MessageBoxBase):
 
     ``media`` 为 ``probe_audio_info()`` 的返回字典（可能为空 —— 探测失败时
     音频相关字段统一显示「—」）；``source`` 为来源标签（已解密/已添加）；
-    ``cover`` 为 ffmpeg 提取的**原始 PNG 字节**（None / 无效表示无封面，
+    ``cover`` 为 cover_loader 提取的**原始图片字节（JPEG/PNG）**（None / 无效表示无封面，
     回退占位图并禁用「保存封面」）。``save_cover`` 为可选回调，返回
     ``(ok, payload)``：成功时 payload 是导出图片的完整路径，失败时是可直接
     展示的错误文案——落盘与日志仍归调用方，本组件只负责按钮与反馈。
@@ -171,9 +171,6 @@ class FileInfoDialog(MessageBoxBase):
         self.coverLabel.setFixedSize(_COVER_W, _COVER_H)
         self.coverLabel.setAlignment(Qt.AlignCenter)
         self.coverLayout.addWidget(self.coverLabel, 0, Qt.AlignCenter)
-        self.coverCaption = CaptionLabel("", self.widget)
-        self.coverCaption.setAlignment(Qt.AlignCenter)
-        self.coverLayout.addWidget(self.coverCaption, 0, Qt.AlignCenter)
         # 保存结果反馈：默认隐藏，只在点击「保存封面」后显示。模态遮罩下首页
         # 的默认成功提示浮层可能被盖住，所以成功/失败都要在对话框内可见。
         self.statusLabel = CaptionLabel("", self.widget)
@@ -183,14 +180,12 @@ class FileInfoDialog(MessageBoxBase):
         self.statusLabel.hide()
         self.coverLayout.addWidget(self.statusLabel, 0, Qt.AlignCenter)
         self.coverLayout.addStretch(1)   # 封面贴顶，与信息表首行齐平
-        pixmap, w, h = _decode_cover(cover)
+        pixmap, _, _ = _decode_cover(cover)
         has_cover = not pixmap.isNull()
         if not has_cover:
             self.coverLabel.setPixmap(_placeholder_pixmap())
-            self.coverCaption.setText("无内嵌封面")
         else:
             self.coverLabel.setPixmap(pixmap)
-            self.coverCaption.setText(f"内嵌封面 · {w} × {h}")
         self.bodyLayout.addLayout(self.coverLayout, 0)
 
         # 键值表（参照详情图）：左列 CaptionLabel（**左对齐**，与右侧值成两列）、

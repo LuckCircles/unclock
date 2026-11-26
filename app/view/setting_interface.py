@@ -41,6 +41,13 @@ class SettingInterface(Interface):
 
         # ===== 基础设置 =====
         self.basicGroup = SettingCardGroup("基础设置", self.view)
+        # 解密引擎选择：选项文本顺序必须与 config.py 的 OptionsValidator 一致
+        # （"um" → "um-cli-rs"）。qconfig 由卡片内部写入并持久化。
+        self.engineCard = ComboBoxSettingCard(
+            cfg.decrypt_engine, FluentIcon.COMMAND_PROMPT, "解密工具",
+            "默认使用 um 链路，可切换为官方 Rust 工具 um-cli-rs。",
+            ["um", "um-cli-rs"], self.view,
+        )
         self.inputCard = PushSettingCard(
             "选择目录", FluentIcon.FOLDER, "输入目录",
             cfg.input_dir.value or "未设置", self.view,
@@ -61,7 +68,14 @@ class SettingInterface(Interface):
             "选择文件", FluentIcon.COMMAND_PROMPT, "qmpc-mmkv-cli 路径",
             cfg.qmpc_path.value, self.view,
         )
-        for card in (self.inputCard, self.outputCard, self.umPathCard, self.ffmpegPathCard, self.qmpcPathCard):
+        self.umCliRsPathCard = PushSettingCard(
+            "选择文件", FluentIcon.COMMAND_PROMPT, "um-cli-rs 路径",
+            cfg.um_cli_rs_path.value, self.view,
+        )
+        for card in (
+            self.engineCard, self.inputCard, self.outputCard, self.umPathCard,
+            self.ffmpegPathCard, self.qmpcPathCard, self.umCliRsPathCard,
+        ):
             self.basicGroup.addSettingCard(card)
         self.vLayout.addWidget(self.basicGroup)
 
@@ -73,6 +87,7 @@ class SettingInterface(Interface):
             (self.umPathCard.button, "<b>选择文件</b><br/>指定 um.exe 的路径"),
             (self.ffmpegPathCard.button, "<b>选择文件</b><br/>指定 ffmpeg.exe 的路径"),
             (self.qmpcPathCard.button, "<b>选择文件</b><br/>指定 qmpc-mmkv-cli.exe 的路径"),
+            (self.umCliRsPathCard.button, "<b>选择文件</b><br/>指定 um_cli_rs.exe 的路径（选择 Rust 引擎时使用）"),
         ):
             btn.setToolTip(tip)
             btn.setToolTipDuration(-1)  # 鼠标移开才隐藏
@@ -117,6 +132,7 @@ class SettingInterface(Interface):
         self.umPathCard.clicked.connect(self._select_um)
         self.ffmpegPathCard.clicked.connect(self._select_ffmpeg)
         self.qmpcPathCard.clicked.connect(self._select_qmpc)
+        self.umCliRsPathCard.clicked.connect(self._select_um_cli_rs)
 
     def _on_theme_changed(self, index):
         """应用主题：setTheme 内部刷新全局样式表并持久化 themeMode。
@@ -167,3 +183,11 @@ class SettingInterface(Interface):
         if file:
             qconfig.set(cfg.qmpc_path, file)
             self.qmpcPathCard.setContent(file)
+
+    def _select_um_cli_rs(self):
+        file, _ = QFileDialog.getOpenFileName(
+            self, "选择 um_cli_rs.exe", "", "Executable (*.exe)"
+        )
+        if file:
+            qconfig.set(cfg.um_cli_rs_path, file)
+            self.umCliRsPathCard.setContent(file)

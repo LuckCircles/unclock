@@ -67,7 +67,7 @@ def _rounded_pixmap(pixmap: QPixmap, side: int = _COVER_SIDE,
 
 def _rounded_cover(png_bytes: bytes, side: int = _COVER_SIDE,
                    radius: int = _COVER_RADIUS) -> QPixmap:
-    """PNG 字节 → 居中裁剪 + 圆角缩略图（保持宽高比，不拉伸变形）。"""
+    """封面图片字节（JPEG/PNG） → 居中裁剪 + 圆角缩略图（保持宽高比）。"""
     img = QImage.fromData(QByteArray(png_bytes))
     return _rounded_pixmap(QPixmap.fromImage(img), side, radius)
 

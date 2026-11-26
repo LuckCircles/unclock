@@ -7,14 +7,17 @@
 ffmpeg 缺失）都静默返回空字典，绝不抛异常打断调用方（信息查看是附加能力，
 不应影响列表主流程）。
 
-与 ``cover_loader`` 同源的注意点：Windows 下必须用 CREATE_NO_WINDOW 抑制
-控制台黑框；stderr 需按多编码解码（中文标签在 GBK 系统上可能是 cp936）。
+封面不再由本模块提取：``probe_media`` 只负责汇总，封面交给 ``cover_loader``
+的标签块直读（毫秒级），元数据仍走一次 ffmpeg。Windows 下必须用
+CREATE_NO_WINDOW 抑制控制台黑框；stderr 需按多编码解码（中文标签在 GBK
+系统上可能是 cp936）。
 """
 
 import os
 import re
 import subprocess
 
+from .cover_loader import extract_cover_bytes
 from .utils import decode_process_output
 
 # 单文件探测超时（秒）：本地进程通常几十毫秒，超时多为损坏文件或慢速设备
@@ -22,9 +25,6 @@ _PROBE_TIMEOUT = 3.0
 
 # 缺失值占位：对话框统一用它显示「—」
 UNKNOWN = "—"
-
-# PNG 文件头签名：校验 ffmpeg stdout 确实是封面图而非报错文本
-_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 # ffmpeg -i 输出解析正则（基于实测输出格式，mp3/flac/m4a/wav 均验证）
 #   Duration: 00:00:03.50, start: 0.025057, bitrate: 195 kb/s
@@ -130,29 +130,20 @@ def probe_audio_info(ffmpeg_path: str, audio_path: str) -> dict:
 
 
 def probe_media(ffmpeg_path: str, audio_path: str) -> tuple:
-    """一次 ffmpeg 调用同时返回 ``(cover_bytes | None, info_dict)``。
+    """返回 ``(原始封面字节 | None, info_dict)``，签名保持不变。
 
-    相比「先 extract_cover_bytes 再 probe_audio_info」的两次进程，本函数只起
-    一个 ffmpeg：stdout 输出首张内嵌封面 PNG，stderr 仍含完整探测元数据。
-    实测两种场景（有/无封面）均可同时拿到标签，耗时约为两次调用的 1/2。
+    B 方案：封面由 ``extract_cover_bytes`` 直读 FLAC/MP3 标签块（不启进程），
+    元数据仍由 ``probe_audio_info`` 起一次 ffmpeg 探测。原来「一次 ffmpeg
+    同时出 PNG + 元数据」的路径把最耗时的 PNG 编码绑在了每张卡片上；拆开后
+    每张卡片只剩几十毫秒的元数据探测，封面解析降到毫秒级。
+    无法识别的容器由 ``extract_cover_bytes`` 自行回退 ffmpeg（输出 PNG）。
 
-    封面以 PNG 签名校验（无封面时 stdout 为空、returncode 非 0，均属正常）；
-    元数据解析不依赖 returncode——与 ``probe_audio_info`` 同理。任何失败
-    返回 ``(None, {})``，绝不抛异常。
+    任何失败返回 ``(None, {})`` 或半成功结果，绝不抛异常。
     """
     if not audio_path or not os.path.isfile(audio_path):
         return None, {}
-    result = _run_ffmpeg(ffmpeg_path, [
-        audio_path,
-        "-map", "0:v:0?", "-frames:v", "1",
-        "-f", "image2pipe", "-vcodec", "png", "pipe:1",
-    ])
-    if result is None:
-        return None, {}
-    stdout = result.stdout or b""
-    cover = stdout if stdout.startswith(_PNG_SIGNATURE) else None
-    # 标签信息全部在 stderr（stdout 是二进制 PNG，不参与文本解析）
-    info = _parse_media_text(decode_process_output(result.stderr or b""))
+    cover = extract_cover_bytes(ffmpeg_path, audio_path)
+    info = probe_audio_info(ffmpeg_path, audio_path)
     return cover, info
 
 

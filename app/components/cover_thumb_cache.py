@@ -1,8 +1,8 @@
 # coding: utf-8
 """已显示封面的 44×44 圆角缩略图 LRU 缓存（components 层，主线程专用）。
 
-``common/cover_loader.CoverCache`` 缓存的是 ffmpeg 输出的**原始 PNG 字节**
-（实测真实专辑图约 1MB / 800×800）。仅缓存字节时，卡片每次重新进入视口
+``common/cover_loader.CoverCache`` 缓存的是标签直读 / ffmpeg 输出的**原始封面字节**
+（JPEG 或 PNG，实测真实专辑图约 1MB / 800×800）。仅缓存字节时，卡片每次重新进入视口
 都要重跑 ``QImage.fromData`` → 缩放 → 圆角裁剪，实测 16.3ms/张，40 张可见
 卡片约 651ms——滚动、全屏重排、切页时就是肉眼可见的卡顿。
 

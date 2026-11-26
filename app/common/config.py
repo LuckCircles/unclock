@@ -39,6 +39,9 @@ class Config(QConfig):
     um_path = ConfigItem("Basic", "um_path", "")
     ffmpeg_path = ConfigItem("Basic", "ffmpeg_path", "")
     qmpc_path = ConfigItem("Basic", "qmpc_path", "")
+    # Rust 版解密引擎（官方 um-conv 使用的离线解密核心）；在设置页选择
+    # um-cli-rs 后由 common/rust_decrypt.py 按官方流程驱动。
+    um_cli_rs_path = ConfigItem("Basic", "um_cli_rs_path", "")
 
     # ===== 转换选项（三态：否 / 是 / 默认） =====
     remove_source = OptionsConfigItem(
@@ -58,6 +61,18 @@ class Config(QConfig):
     )
     skip_noop = OptionsConfigItem(
         "Conversion", "skip_noop", "默认", OptionsValidator(["否", "是", "默认"])
+    )
+
+    # ===== 调度行为（借鉴官方 preflight + worker pool；无 UI 入口，可通过 config.json 调整） =====
+    # 默认关闭并发以保持既有串行行为；开启后 0/负数自动取 CPU 核数（上限 256）
+    parallel_enabled = ConfigItem("Conversion", "parallel_enabled", False)
+    parallel_count = ConfigItem("Conversion", "parallel_count", 0)
+
+    # ===== 解密引擎 =====
+    # 默认 um（Go 版原链路）；um-cli-rs 走官方 -I 探测 → 密钥解析 → 解密流程。
+    decrypt_engine = OptionsConfigItem(
+        "Conversion", "decrypt_engine", "um",
+        OptionsValidator(["um", "um-cli-rs"]),
     )
 
     # ===== 任务行为 =====
@@ -84,6 +99,7 @@ CONVERSION_OPTIONS = (
 _DEFAULT_UM = str(PROJECT_ROOT / "tools" / "um.exe")
 _DEFAULT_FFMPEG = str(PROJECT_ROOT / "tools" / "ffmpeg.exe")
 _DEFAULT_QMPC = str(PROJECT_ROOT / "tools" / "qmpc-mmkv-cli.exe")
+_DEFAULT_UM_CLI_RS = str(PROJECT_ROOT / "tools" / "um_cli_rs.exe")
 
 # 加载前先记录配置文件是否存在（不依赖 qconfig.load 是否创建文件的实现细节），
 # 供下方「首次运行生成」判断
@@ -104,6 +120,7 @@ for item, default_path in (
     (cfg.um_path, _DEFAULT_UM),
     (cfg.ffmpeg_path, _DEFAULT_FFMPEG),
     (cfg.qmpc_path, _DEFAULT_QMPC),
+    (cfg.um_cli_rs_path, _DEFAULT_UM_CLI_RS),
 ):
     current = item.value if isinstance(item.value, str) else ""
     if current and Path(current).is_file():
@@ -115,7 +132,7 @@ for item, default_path in (
         qconfig.set(item, default_path, save=False)
 
 # 首次运行（无配置文件）：按当前值生成默认配置并落盘——
-# 输入/输出目录为空；三个 exe 指向项目根 tools/（上方已探测）；其余取默认值。
+# 输入/输出目录为空；四个 exe 指向项目根 tools/（上方已探测）；其余取默认值。
 if not _config_existed:
     try:
         qconfig.save()

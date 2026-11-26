@@ -34,7 +34,11 @@ from qfluentwidgets import (
 )
 
 from ..common.config import cfg
-from ..common.cover_loader import CoverCache, extract_cover_bytes
+from ..common.cover_loader import (
+    CoverCache,
+    cover_bytes_to_png,
+    extract_cover_bytes,
+)
 from ..common.decrypt_scanner import build_input_basenames, output_source_label
 from ..common.logger import logger
 from ..common.media_info import guess_artist_from_name, probe_audio_info, probe_media
@@ -835,7 +839,7 @@ class DecryptedInterface(GridCardContainer):
         QDesktopServices.openUrl(QUrl.fromLocalFile(card.file_path))
 
     def _load_cover_bytes(self, path: str, mtime: float, card=None, item=None):
-        """取原始封面 PNG 字节：命中缓存零 ffmpeg，MISS 现场提取一次并回填。
+        """取封面原始图片字节（JPEG/PNG）：命中缓存零探测，MISS 现场提取一次并回填。
 
         「查看信息」与「保存封面」共用入口，保证两处拿到同一份数据，也避免
         同一文件重复起 ffmpeg。``None`` 同样是有效缓存值（确认无封面）。
@@ -865,11 +869,11 @@ class DecryptedInterface(GridCardContainer):
         后发 ``signalBus.toast_requested(..., "success")``，由首页弹**默认
         成功提示**（3s、无动作按钮）；日志仍记完整路径。
 
-        导出的是 ffmpeg 提取的**原始封面**，不是卡片上 44×44 的圆角缩略图。
-        优先复用后台探测已缓存的字节（显示过封面的卡片瞬时可用）；缓存未
-        命中才由 ``_load_cover_bytes`` 现场起一次 ffmpeg，并回填字节 + 缩略图
-        两级缓存，让卡片立刻出图、之后再次显示也秒加载。用户主动点击，
-        不占用后台探测队列。
+        导出的是音频容器里的**原始封面**，不是卡片上 44×44 的圆角缩略图。
+        后台探测现在直接读标签块（毫秒级），缓存里可能是 JPEG 也可能是 PNG；
+        因目标文件名固定 ``.png``，这里在写入前用 ``cover_bytes_to_png``
+        转码一次（约 226ms，用户主动点击才发生）。缓存未命中才由
+        ``_load_cover_bytes`` 现场提取并回填字节 + 缩略图两级缓存。
 
         返回 ``(ok, payload)``：成功时 payload 是导出图片的完整路径，失败时
         是可直接展示的原因文案。2026-11-23 起唯一调用方是 ``FileInfoDialog``
@@ -891,11 +895,16 @@ class DecryptedInterface(GridCardContainer):
         if not cover:
             return (False, f"未能提取「{name}」的内嵌封面（文件可能没有封面）")
 
+        # 目标固定 .png：JPEG 原始图必须转码，不能把 JPEG 字节写成 .png
+        png = cover_bytes_to_png(cover)
+        if not png:
+            return (False, "封面图片无法转换为 PNG，保存已取消")
+
         # 一键落盘：同目录固定同名 .png，"wb" 直接覆盖，不加序号。
         target = _cover_path(path)
         try:
             with open(target, "wb") as f:
-                f.write(cover)
+                f.write(png)
         except OSError as exc:
             logger.error(f"保存封面失败: {target} ({exc})")
             return (False, "保存封面失败，请检查路径权限或文件是否被占用。")
